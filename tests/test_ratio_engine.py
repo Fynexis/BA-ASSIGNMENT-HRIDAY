@@ -9,31 +9,11 @@ import pytest
 from openpyxl import Workbook
 
 from ratio_engine import (
-    HIGHLIGHT_STYLE,
-    IDENTITY_PAIRS,
-    INDUSTRY_HIGHLIGHTS,
-    INSIGHTS_ENGINE,
     ITEM_COLUMNS,
     RATIO_CATEGORIES,
+    RATIO_SPECS,
     UNIVERSAL_RATIOS,
-    build_insight_markdown,
-    category_scores,
-    correlation_matrix,
-    cross_industry_medians,
-    data_checks,
-    describe_correlation,
-    format_value,
-    highlights_for,
-    industry_category_summary,
-    industry_panel,
-    industry_trend,
     load_financials,
-    matrix_styles,
-    pair_counts,
-    peer_percentile,
-    regression_slope,
-    style_matrix,
-    top_correlations,
 )
 
 APP_PATH = str(Path(__file__).resolve().parent.parent / "app.py")
@@ -130,35 +110,9 @@ def data(xlsx_path):
     return load_financials(xlsx_path)
 
 
-@pytest.fixture(scope="module")
-def pool(data):
-    return data.pool
-
-
 def ratio(data, company, year, name):
     r = data.ratios
     return r.loc[(r["Company"] == company) & (r["Year"] == year), name].iloc[0]
-
-
-def test_definitions():
-    assert len(UNIVERSAL_RATIOS) == 25 and len(set(UNIVERSAL_RATIOS)) == 25
-    assert len(RATIO_CATEGORIES) == 5 and all(len(v) == 5 for v in RATIO_CATEGORIES.values())
-    assert set(INSIGHTS_ENGINE) == set(INDUSTRY_HIGHLIGHTS)
-    for industry, highlights in INDUSTRY_HIGHLIGHTS.items():
-        assert len(highlights) == 4 and set(highlights) <= set(UNIVERSAL_RATIOS)
-        md = build_insight_markdown(industry)
-        assert all(f"**{r}**" in md and INSIGHTS_ENGINE[industry][r] for r in highlights)
-    assert all(p <= set(UNIVERSAL_RATIOS) for p in IDENTITY_PAIRS)
-    assert len(highlights_for("Unknown Industry")) == 4
-
-
-def test_loader_shape(data):
-    assert data.years == YEARS
-    assert list(data.pool) == INDUSTRIES
-    assert len(data.ratios) == len(INDUSTRIES) * N_COMPANIES * len(YEARS)
-    df = data.pool["FMCG"]["FMCG Co 03"]
-    assert list(df.index) == UNIVERSAL_RATIOS
-    assert list(df.columns) == ["Ratio Category", *YEARS]
 
 
 def test_csv_and_xlsx_give_same_ratios(data, tmp_path):
@@ -198,112 +152,6 @@ def test_placeholders_and_meaningless_ratios_are_blank(data):
     assert ratio(data, "FMCG Co 01", "FY2024", "Debt-to-Equity") == 0
 
 
-def test_data_checks(data):
-    checks = data_checks(data)
-    assert ((checks["Company"] == "FMCG Co 02") & checks["Issue"].str.startswith("Dividend yield")).any()
-    assert ((checks["Company"] == "FMCG Co 00") & checks["Issue"].str.startswith("Negative equity")).any()
-
-
-def test_matrix_styles_highlight_exactly_four_rows(pool):
-    industry = "FMCG"
-    df = next(iter(pool[industry].values()))
-    styles = matrix_styles(df, INDUSTRY_HIGHLIGHTS[industry])
-    lit = [r for r in styles.index if (styles.loc[r] == HIGHLIGHT_STYLE).all()]
-    assert sorted(lit) == sorted(INDUSTRY_HIGHLIGHTS[industry])
-    assert "Inventory Turnover" in style_matrix(df, INDUSTRY_HIGHLIGHTS[industry], YEARS[0]).to_html()
-
-
-def test_format_value_units():
-    assert format_value("Net Profit Margin", 12.345) == "12.35%"
-    assert format_value("Debt-to-Equity", 1.5) == "1.50x"
-    assert format_value("Days Sales Outstanding (DSO)", 42.06) == "42.1d"
-    assert format_value("Debt-to-Equity", float("nan")) == "—"
-
-
-def test_peer_percentile():
-    peers = pd.Series([1.0, 2.0, 3.0, 4.0, np.nan])
-    assert peer_percentile("Current Ratio", 4.0, peers) == 100.0
-    assert peer_percentile("Debt-to-Equity", 4.0, peers) == 25.0
-    assert pd.isna(peer_percentile("Current Ratio", np.nan, peers))
-
-
-def test_correlations(pool):
-    panel = industry_panel(pool, "Technology / Software")
-    assert panel.shape == (N_COMPANIES * len(YEARS), 25)
-    assert industry_panel(pool, "FMCG", "FY2026").shape == (N_COMPANIES, 25)
-    corr = correlation_matrix(panel, "spearman")
-    assert corr.shape == (25, 25)
-    # DSO = 365 / receivables turnover, so ranks are perfectly reversed
-    assert corr.at["Receivables Turnover", "Days Sales Outstanding (DSO)"] == pytest.approx(-1.0)
-    counts = pair_counts(panel)
-    assert counts.at["Inventory Turnover", "Inventory Turnover"] == len(panel) - 1
-    # Too few paired observations -> not reported
-    small = correlation_matrix(industry_panel(pool, "FMCG", "FY2026").head(5))
-    assert small.isna().all().all()
-
-
-def test_top_correlations(pool):
-    corr = correlation_matrix(industry_panel(pool, "FMCG"))
-    all_pairs = top_correlations(corr, include_identities=True)
-    economic = top_correlations(corr, include_identities=False, counts=pair_counts(industry_panel(pool, "FMCG")))
-    assert (all_pairs["r"].abs().diff().dropna() <= 1e-12).all()
-    assert (economic["Link"] == "Economic").all() and "n" in economic.columns
-    assert len(all_pairs) > len(economic)
-
-
-def test_describe_correlation_wording():
-    assert "go **up** too" in describe_correlation("A", "B", 0.8)
-    assert "go **down**" in describe_correlation("A", "B", -0.5)
-    assert "independently" in describe_correlation("A", "B", 0.05)
-    assert "cannot be measured" in describe_correlation("A", "B", float("nan"))
-
-
-def test_regression_slope():
-    x = pd.Series([1.0, 2.0, 3.0, np.nan])
-    assert regression_slope(x, 2 * x + 1) == pytest.approx(2.0)
-    assert pd.isna(regression_slope(pd.Series([1.0, 1.0, 1.0]), pd.Series([1.0, 2.0, 3.0])))
-
-
-def test_industry_stats(pool):
-    year = YEARS[-1]
-    summary = industry_category_summary(pool, "Technology / Software", "Profitability", year)
-    assert list(summary.index) == RATIO_CATEGORIES["Profitability"]
-    assert (summary["P25"] <= summary["Median"]).all() and (summary["Median"] <= summary["P75"]).all()
-    assert summary.at["Return on Equity (ROE)", "Companies"] == N_COMPANIES
-    assert list(industry_trend(pool, "FMCG", "Net Profit Margin").index) == YEARS
-    assert list(cross_industry_medians(pool, "Leverage", year).columns) == INDUSTRIES
-    scores = category_scores(pool, "FMCG", "Profitability", year)
-    assert len(scores) == N_COMPANIES and scores.between(0, 100).all() and scores.is_monotonic_decreasing
-
-
-def test_app_runs_on_workbook(xlsx_path, monkeypatch):
-    from streamlit.testing.v1 import AppTest
-
-    monkeypatch.setenv("FINANCIALS_PATH", str(xlsx_path))
-    at = AppTest.from_file(APP_PATH, default_timeout=60).run()
-    assert not at.exception
-    for industry in INDUSTRIES:
-        at.selectbox[0].select(industry).run()
-        assert not at.exception
-        assert len(at.tabs[0].metric) == 4
-        assert INSIGHTS_ENGINE[industry]["title"] in at.info[0].value
-    at.selectbox[0].select("Technology / Software").run()
-    at.selectbox[1].select("Technology Co 01").run()  # company with a loss year
-    assert not at.exception
-    for category in RATIO_CATEGORIES:
-        at.radio[0].set_value(category).run()
-        assert not at.exception
-    at.radio[1].set_value(at.radio[1].options[1]).run()  # single-year scope
-    at.radio[2].set_value("Pearson").run()
-    at.toggle[0].set_value(True).run()
-    assert not at.exception
-    # PCA & clustering controls
-    at.slider(key="mv_k").set_value(3).run()
-    at.radio(key="mv_period").set_value(at.radio(key="mv_period").options[1]).run()
-    at.selectbox(key="mv_ncomp").set_value(3).run()
-    assert not at.exception
-
-
 def test_app_without_data_asks_for_upload(tmp_path, monkeypatch):
     from streamlit.testing.v1 import AppTest
 
@@ -319,3 +167,34 @@ def test_item_columns_match_template():
     template = Path(__file__).resolve().parent.parent / "data" / "capiq_template.xlsx"
     header = [c.value for c in load_workbook(template, read_only=True)["Data"][2]]
     assert set(ITEM_COLUMNS) <= set(header)
+
+
+def test_definitions():
+    assert len(UNIVERSAL_RATIOS) == 25 and len(set(UNIVERSAL_RATIOS)) == 25
+    assert len(RATIO_CATEGORIES) == 5 and all(len(v) == 5 for v in RATIO_CATEGORIES.values())
+    assert all(spec.unit in {"x", "%", "days"} for spec in RATIO_SPECS.values())
+
+
+def test_loader_shape(data):
+    assert data.years == YEARS
+    assert list(dict.fromkeys(data.ratios["Industry"])) == INDUSTRIES
+    assert len(data.ratios) == len(INDUSTRIES) * N_COMPANIES * len(YEARS)
+    assert list(data.ratios.columns) == ["Industry", "Company", "Year", *UNIVERSAL_RATIOS]
+
+
+def test_app_runs_on_workbook(xlsx_path, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+
+    monkeypatch.setenv("FINANCIALS_PATH", str(xlsx_path))
+    at = AppTest.from_file(APP_PATH, default_timeout=60).run()
+    assert not at.exception
+    assert len(at.tabs) == 0  # single page
+    assert any("Step 1" in m.value for m in at.markdown)
+    at.slider(key="k").set_value(3).run()
+    assert not at.exception and at.metric[3].value == "3"
+    at.selectbox(key="period").set_value(YEARS[-1]).run()
+    at.selectbox(key="ncomp").set_value(3).run()
+    at.slider(key="winsor").set_value(0).run()
+    assert not at.exception
+    assert at.metric[0].value == "3"  # components kept
+

@@ -23,8 +23,8 @@
 - **Sample:** 100 NSE-listed companies, 25 each in IT, Pharmaceuticals, FMCG, and Infrastructure / Heavy Manufacturing.
 - **Period:** FY2017–FY2026, March year-ends, consolidated accounts.
 - **Source:** Screener.in, laid out in the Capital IQ template format. The data is not stored in this repository.
-- **Ratios:** 25 ratios across Liquidity, Profitability, Efficiency, Leverage and Valuation. All formulas are in the dashboard's Data & Checks tab.
-- **No new data is needed.** One data point should be checked: Vedanta's share price history (see Data & Checks).
+- **Ratios:** 25 ratios across Liquidity, Profitability, Efficiency, Leverage and Valuation. All formulas are in `ratio_engine.py` (`RATIO_SPECS`).
+- **No new data is needed.** One data point should be checked: Vedanta's share price history, which looks inconsistent with its dividends.
 
 ## 4. Method, step by step
 
@@ -41,21 +41,19 @@
 | 9. Validate | Compare clusters with industries using a cluster × industry table and the Adjusted Rand Index (ARI). Check stability by comparing k-means with Ward clustering (also with ARI). | Tests whether financial profiles match industry membership. |
 | 10. Industry differences | Run a Kruskal–Wallis test per ratio across the industries, with eta² as the effect size. | Shows which ratios really tell the industries apart. This gives the industry "highlight" ratios a data-based justification. |
 
-## 5. Where each result is in the dashboard
+## 5. Where each result is in the app
 
-| Report section | Dashboard tab |
+| Report section | Location on the page |
 |---|---|
-| Descriptive statistics by industry | Industry Stats |
-| Company case studies | Company Matrix |
-| Correlation between ratios | Ratio Correlations (Spearman) |
-| PCA: scree plot, loadings, ratio groups | PCA & Clustering → Step 1 |
-| Clusters, cluster profiles, cluster × industry table | PCA & Clustering → Step 2 |
-| Ratios that separate the industries | PCA & Clustering → Step 3 |
-| Data cleaning and limitations | Data & Checks |
+| Data preparation | Notes under the title, and Settings |
+| PCA: scree plot, loadings, ratio groups | Step 1 |
+| Clusters, cluster × industry table, cluster profiles | Step 2 |
+| Ratios that separate the industries | Step 3 |
+| Reproducing the results in jamovi | Bottom of the page |
 
 ## 6. Reproducing the results in jamovi
 
-1. Download the CSV from **PCA & Clustering → Reproduce in jamovi** and open it in jamovi.
+1. Download `pca_cluster_data.csv` from the **Reproduce in jamovi** section at the bottom of the page and open it in jamovi.
 2. Run **Factor → Principal Component Analysis** on the 21 ratio columns, with eigenvalue > 1 and varimax rotation. The loadings will match, though some signs may be flipped.
 3. Install the **snowCluster** module, then run k-means on the PC score columns.
 4. Run **ANOVA → One-Way ANOVA (Non-parametric)**, which is the Kruskal–Wallis test, with each ratio by Industry.
@@ -64,7 +62,7 @@
 
 - Screener doesn't report cost of goods sold or current assets and liabilities directly, so these are estimates. This affects gross margin and the liquidity ratios.
 - Inventory-based ratios can't be calculated for most IT companies.
-- The PCA and clustering use 10-year medians, so changes over time are deliberately smoothed out. The trend charts cover how ratios change over time.
+- The PCA and clustering use 10-year medians, so changes over time are deliberately smoothed out. A single year can be chosen in Settings for comparison.
 - Cluster results depend on the choices made: which ratios are included, how outliers are capped, and k. The silhouette score and the Ward comparison show how firm the clusters are.
 - Correlation and clustering show association, not cause.
 
