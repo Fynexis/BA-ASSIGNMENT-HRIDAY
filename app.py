@@ -14,6 +14,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+import multivariate as mv
 from ratio_engine import (
     RATIO_CATEGORIES,
     RATIO_SPECS,
@@ -72,6 +73,13 @@ def load_panel(_data, data_key: str, industry: str, year: str | None):
     return industry_panel(_data.pool, industry, year)
 
 
+@st.cache_data
+def run_multivariate(_data, data_key: str, years: tuple | None, exclude: tuple, winsor: float, n_comp: int | None, k: int):
+    prep = mv.prepare(_data, list(years) if years else None, list(exclude), winsor)
+    pca = mv.run_pca(prep, n_comp)
+    return prep, pca, mv.cluster_companies(prep, pca, k), mv.industry_separation(prep)
+
+
 # ==========================================
 # DATA SOURCE
 # ==========================================
@@ -127,8 +135,8 @@ highlight_targets = highlights_for(selected_industry)
 peers = peer_snapshot(data_pool, selected_industry, selected_year)
 peer_medians = peers.median(axis=1)
 
-tab_matrix, tab_industry, tab_corr, tab_data = st.tabs(
-    ["📋 Company Matrix", "🏭 Industry Stats", "🔗 Ratio Correlations", "🧾 Data & Checks"]
+tab_matrix, tab_industry, tab_corr, tab_multi, tab_data = st.tabs(
+    ["📋 Company Matrix", "🏭 Industry Stats", "🔗 Ratio Correlations", "🧩 PCA & Clustering", "🧾 Data & Checks"]
 )
 
 # ==========================================
@@ -481,3 +489,258 @@ with tab_data:
         mime="text/csv",
     )
     st.caption("Blank cells in the CSV are ratios that are not meaningful for that company-year.")
+
+# ==========================================
+# TAB 5: PCA & CLUSTERING
+# ==========================================
+CLUSTER_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
+
+with tab_multi:
+    st.subheader("🧩 PCA and cluster analysis: all 100 companies")
+    st.markdown(
+        "Two different questions, answered in order:\n"
+        "1. **Grouping the ratios (PCA).** Many of the 25 ratios measure the same thing. PCA reduces them to a "
+        "few underlying financial dimensions (*components*) and shows which ratios belong together.\n"
+        "2. **Grouping the companies (cluster analysis).** Companies are grouped by how similar their scores on "
+        "those components are. The clusters are then compared with the four industries.\n\n"
+        "Each company is **one row**: the median of each ratio over the selected years."
+    )
+
+    with st.expander("⚙️ Settings (defaults follow standard practice; change only if you have a reason)"):
+        s1, s2 = st.columns(2)
+        with s1:
+            period = st.radio(
+                "Years used for each company's profile:",
+                [f"Median of all years ({YEARS[0]}–{YEARS[-1]})", f"{selected_year} only"],
+                key="mv_period",
+            )
+            winsor = st.slider(
+                "Cap extreme values at percentile (each tail)", 0, 10, 5, key="mv_winsor",
+                help="Values beyond this percentile are set to the percentile, so a few outliers cannot dominate PCA.",
+            ) / 100
+        with s2:
+            exclude = st.multiselect(
+                "Ratios left out:",
+                UNIVERSAL_RATIOS,
+                default=list(mv.DEFAULT_EXCLUDED),
+                key="mv_exclude",
+                help="Left out by default: " + " ".join(f"{r}: {why}" for r, why in mv.DEFAULT_EXCLUDED.items()),
+            )
+            n_comp_choice = st.selectbox(
+                "Number of components:", ["Automatic (eigenvalue > 1)"] + list(range(2, 11)), key="mv_ncomp"
+            )
+    years_sel = None if period.startswith("Median") else (selected_year,)
+    n_comp = None if isinstance(n_comp_choice, str) else int(n_comp_choice)
+
+    k_default = 4
+    k = st.session_state.get("mv_k", k_default)
+    prep, pca, clus, sep = run_multivariate(data, data_key, years_sel, tuple(exclude), winsor, n_comp, k)
+    labels = mv.component_labels(pca)
+    comps = list(pca.loadings.columns)
+
+    for note in prep.notes:
+        st.caption(f"ℹ️ {note}")
+    st.caption(f"{len(prep.z)} companies × {len(prep.ratios)} ratios used.")
+
+    # ---------- Step 1: PCA ----------
+    st.markdown("### Step 1 · Grouping the ratios with PCA")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Components kept", pca.n_components)
+    m2.metric("Variance explained", f"{pca.explained['Cumulative %'].iloc[pca.n_components - 1]:.1f}%")
+    m3.metric("Ratios reduced", f"{len(prep.ratios)} → {pca.n_components}")
+
+    scree_col, table_col = st.columns([3, 2])
+    with scree_col:
+        scree = pca.explained.reset_index(names="Component").head(12)
+        scree["Kept"] = scree.index < pca.n_components
+        bars = (
+            alt.Chart(scree)
+            .mark_bar(cornerRadiusEnd=4)
+            .encode(
+                x=alt.X("Component:N", sort=None, title=None, axis=alt.Axis(labelAngle=0)),
+                y=alt.Y("Eigenvalue:Q"),
+                color=alt.condition(alt.datum.Kept, alt.value(HIGHLIGHT), alt.value(PEER)),
+                tooltip=["Component", alt.Tooltip("Eigenvalue:Q", format=".2f"),
+                         alt.Tooltip("% of variance:Q", format=".1f"), alt.Tooltip("Cumulative %:Q", format=".1f")],
+            )
+        )
+        rule = alt.Chart(pd.DataFrame({"y": [1]})).mark_rule(strokeDash=[4, 4], color=NEGATIVE).encode(y="y:Q")
+        st.altair_chart((bars + rule).properties(height=300, title="Scree plot"), width="stretch")
+        st.caption("Blue = components kept. Dashed line = eigenvalue 1 (a component must explain more than one ratio's worth of variance).")
+    with table_col:
+        expl = pca.explained.head(pca.n_components).copy()
+        expl.insert(0, "Name", [labels[c] for c in expl.index])
+        st.dataframe(expl.round(2), width="stretch")
+
+    st.markdown("**Which ratios belong to which component** (varimax-rotated loadings)")
+    load_long = pca.loadings.reset_index(names="Ratio").melt("Ratio", var_name="Component", value_name="Loading")
+    load_long["Component"] = load_long["Component"].map(lambda c: f"{c}: {labels[c]}")
+    heat = (
+        alt.Chart(load_long)
+        .mark_rect(stroke="white", strokeWidth=1)
+        .encode(
+            x=alt.X("Component:N", sort=None, title=None, axis=alt.Axis(labelAngle=-30, labelLimit=260, labelOverlap=False)),
+            y=alt.Y("Ratio:N", sort=list(pca.assignment.index), title=None, axis=alt.Axis(labelLimit=240)),
+            color=alt.Color("Loading:Q", scale=alt.Scale(domain=[-1, 0, 1], range=[NEGATIVE, NEUTRAL, POSITIVE], interpolate="lab")),
+            tooltip=["Ratio", "Component", alt.Tooltip("Loading:Q", format="+.2f")],
+        )
+    )
+    text = (
+        alt.Chart(load_long[load_long["Loading"].abs() >= 0.4])
+        .mark_text(fontSize=11)
+        .encode(x=alt.X("Component:N", sort=None), y=alt.Y("Ratio:N", sort=list(pca.assignment.index)),
+                text=alt.Text("Loading:Q", format=".2f"))
+    )
+    st.altair_chart((heat + text).properties(height=len(prep.ratios) * 24), width="stretch")
+    st.caption("Ratios are sorted by the component they load on most. Numbers shown where |loading| ≥ 0.4.")
+
+    assign = pca.assignment.copy()
+    assign["Component"] = assign["Component"].map(lambda c: f"{c}: {labels[c]}")
+    assign["Matches textbook?"] = [
+        "✓" if cat in comp else "✗" for cat, comp in zip(assign["Textbook category"], assign["Component"])
+    ]
+    st.dataframe(assign.round(2), width="stretch")
+    mismatch = assign[assign["Matches textbook?"] == "✗"]
+    st.info(
+        f"**{len(assign) - len(mismatch)} of {len(assign)} ratios** group where the textbook puts them. "
+        + (
+            "Exceptions: " + "; ".join(f"**{r}** ({row['Textbook category']}) behaves like {row['Component'].split(': ', 1)[1]}"
+                                     for r, row in mismatch.iterrows()) + "."
+            if len(mismatch) else ""
+        )
+    )
+
+    # ---------- Step 2: clustering ----------
+    st.markdown("### Step 2 · Grouping the companies with cluster analysis")
+    st.markdown(
+        f"k-means clustering on the {pca.n_components} component scores (standardised). "
+        "Pick the number of clusters; the silhouette chart shows how well-separated each choice is."
+    )
+    k_col, sil_col = st.columns([1, 3])
+    with k_col:
+        st.slider("Number of clusters (k)", 2, 8, k_default, key="mv_k",
+                  help="4 lets you compare directly with the 4 industries.")
+        best_k = int(clus.silhouette.idxmax())
+        st.caption(f"Best-separated choice: **k = {best_k}** (silhouette {clus.silhouette.max():.2f}).")
+    with sil_col:
+        sil = clus.silhouette.rename_axis("k").reset_index()
+        sil["Selected"] = sil["k"] == clus.k
+        sil_chart = (
+            alt.Chart(sil)
+            .mark_bar(cornerRadiusEnd=4)
+            .encode(
+                x=alt.X("k:O", title="Number of clusters", axis=alt.Axis(labelAngle=0)),
+                y=alt.Y("Average silhouette:Q", title="Silhouette"),
+                color=alt.condition(alt.datum.Selected, alt.value(HIGHLIGHT), alt.value(PEER)),
+                tooltip=["k", alt.Tooltip("Average silhouette:Q", format=".3f")],
+            )
+        )
+        st.altair_chart(sil_chart.properties(height=200), width="stretch")
+        st.caption("Silhouette guide: above 0.5 strong, 0.25–0.5 moderate, below 0.25 weak/overlapping clusters.")
+
+    a1, a2, a3 = st.columns(3)
+    a1.metric("Clusters", clus.k)
+    a2.metric("Match with industries (ARI)", f"{clus.ari_industry:.2f}",
+              help="Adjusted Rand Index: 1 = clusters identical to industries, 0 = no better than chance.")
+    a3.metric("Agreement with Ward clustering (ARI)", f"{clus.ari_ward:.2f}",
+              help="Stability check: the same data clustered with a different method (hierarchical, Ward).")
+
+    plot_df = pca.scores.iloc[:, :2].copy()
+    plot_df.columns = ["x", "y"]
+    plot_df["Company"] = plot_df.index
+    plot_df["Industry"] = prep.industry.reindex(plot_df.index).values
+    plot_df["Cluster"] = clus.labels.reindex(plot_df.index).map(lambda c: f"Cluster {c}").values
+    domain = [f"Cluster {i}" for i in range(1, clus.k + 1)]
+    scatter = (
+        alt.Chart(plot_df)
+        .mark_point(filled=True, size=90, stroke="white", strokeWidth=1, opacity=0.9)
+        .encode(
+            x=alt.X("x:Q", title=f"{comps[0]}: {labels[comps[0]]}"),
+            y=alt.Y("y:Q", title=f"{comps[1]}: {labels[comps[1]]}"),
+            color=alt.Color("Cluster:N", scale=alt.Scale(domain=domain, range=CLUSTER_COLORS[: clus.k]),
+                            legend=alt.Legend(orient="right")),
+            shape=alt.Shape(
+                "Industry:N",
+                scale=alt.Scale(domain=industries, range=["circle", "square", "triangle-up", "diamond"][: len(industries)]),
+                legend=alt.Legend(orient="right", labelLimit=240),
+            ),
+            tooltip=["Company", "Industry", "Cluster", alt.Tooltip("x:Q", format=".2f", title=comps[0]),
+                     alt.Tooltip("y:Q", format=".2f", title=comps[1])],
+        )
+    )
+    st.altair_chart(scatter.properties(height=460, title="Companies on the first two components"), width="stretch")
+    st.caption("Colour = cluster, shape = industry. If clusters matched industries, each colour would have one shape.")
+
+    ct_col, desc_col = st.columns([3, 2])
+    with ct_col:
+        st.markdown("**Clusters vs industries** (number of companies)")
+        ct = clus.crosstab.copy()
+        ct.index = [f"Cluster {i}" for i in ct.index]
+        ct["Total"] = ct.sum(axis=1)
+        st.dataframe(ct, width="stretch")
+    with desc_col:
+        st.markdown("**What characterises each cluster**")
+        for c, text_desc in clus.descriptions.items():
+            st.markdown(f"- **Cluster {c}** ({int((clus.labels == c).sum())} cos.): {text_desc}")
+
+    prof = clus.profile_z.copy()
+    prof.index = [f"Cluster {i}" for i in prof.index]
+    prof_long = prof.reset_index(names="Cluster").melt("Cluster", var_name="Ratio", value_name="z")
+    prof_heat = (
+        alt.Chart(prof_long)
+        .mark_rect(stroke="white", strokeWidth=1)
+        .encode(
+            x=alt.X("Ratio:N", sort=list(pca.assignment.index), title=None,
+                    axis=alt.Axis(labelAngle=-45, labelLimit=200, labelOverlap=False)),
+            y=alt.Y("Cluster:N", title=None),
+            color=alt.Color("z:Q", scale=alt.Scale(domain=[-1.5, 0, 1.5], range=[NEGATIVE, NEUTRAL, POSITIVE],
+                                                   interpolate="lab", clamp=True), title="vs average (sd)"),
+            tooltip=["Cluster", "Ratio", alt.Tooltip("z:Q", format="+.2f")],
+        )
+    )
+    st.altair_chart(prof_heat.properties(height=40 * clus.k + 140, title="Cluster profiles"), width="stretch")
+    st.caption("Blue = above the all-company average, red = below (in standard deviations).")
+
+    with st.expander("Companies in each cluster"):
+        members = pd.DataFrame({"Cluster": clus.labels, "Industry": prep.industry.reindex(clus.labels.index)})
+        for c in sorted(members["Cluster"].unique()):
+            grp = members[members["Cluster"] == c]
+            st.markdown(f"**Cluster {c}** — " + ", ".join(f"{n} ({ind.split()[0]})" for n, ind in grp["Industry"].items()))
+
+    # ---------- Step 3: industry separation ----------
+    st.markdown("### Step 3 · Which ratios really separate the industries?")
+    st.markdown("Kruskal–Wallis test on each ratio across the 4 industries. **eta²** = share of the ratio's "
+                "variation explained by industry (0.01 small, 0.06 medium, 0.14+ large).")
+    sep_chart = (
+        alt.Chart(sep)
+        .mark_bar(cornerRadiusEnd=4, height=12)
+        .encode(
+            x=alt.X("eta²:Q", title="eta² (variation explained by industry)"),
+            y=alt.Y("Ratio:N", sort=None, title=None, axis=alt.Axis(labelLimit=240, labelOverlap=False)),
+            color=alt.condition(alt.datum["p-value"] < 0.05, alt.value(HIGHLIGHT), alt.value(PEER)),
+            tooltip=["Ratio", alt.Tooltip("eta²:Q", format=".3f"), alt.Tooltip("p-value:Q", format=".4f"),
+                     "Highest industry", "Lowest industry"],
+        )
+    )
+    st.altair_chart(sep_chart.properties(height=len(sep) * 22), width="stretch")
+    st.caption("Blue = significant difference between industries (p < 0.05).")
+    st.dataframe(sep.round(4), hide_index=True, width="stretch")
+
+    # ---------- Downloads / jamovi ----------
+    st.markdown("### Reproduce in jamovi")
+    out_scores = pca.scores.copy()
+    out_scores.columns = [f"{c} {labels[c]}" for c in out_scores.columns]
+    export = pd.concat(
+        [prep.industry.rename("Industry"), prep.features.round(4), out_scores.round(4), clus.labels.rename("Cluster")],
+        axis=1,
+    ).rename_axis("Company").reset_index()
+    st.download_button("⬇️ PCA input, component scores and clusters (CSV)", export.to_csv(index=False).encode("utf-8"),
+                       file_name="pca_cluster_data.csv", mime="text/csv")
+    st.markdown(
+        "1. Open the CSV in jamovi.\n"
+        "2. **Factor → Principal Component Analysis**: add the ratio columns (not the PC or Cluster columns). "
+        "Keep *Based on eigenvalue > 1* and *Varimax* rotation. Loadings will match Step 1 (signs may flip).\n"
+        "3. **Clustering** (install the *snowCluster* module from the jamovi library): k-means on the PC columns "
+        f"with k = {clus.k}. Cluster numbers may be ordered differently, but the groups will be the same or very close.\n"
+        "4. **ANOVA → One-Way ANOVA (Non-parametric) / Kruskal–Wallis** on each ratio by Industry reproduces Step 3."
+    )

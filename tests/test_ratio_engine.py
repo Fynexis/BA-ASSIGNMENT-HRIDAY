@@ -285,7 +285,7 @@ def test_app_runs_on_workbook(xlsx_path, monkeypatch):
     for industry in INDUSTRIES:
         at.selectbox[0].select(industry).run()
         assert not at.exception
-        assert len(at.metric) == 4
+        assert len(at.tabs[0].metric) == 4
         assert INSIGHTS_ENGINE[industry]["title"] in at.info[0].value
     at.selectbox[0].select("Technology / Software").run()
     at.selectbox[1].select("Technology Co 01").run()  # company with a loss year
@@ -296,6 +296,11 @@ def test_app_runs_on_workbook(xlsx_path, monkeypatch):
     at.radio[1].set_value(at.radio[1].options[1]).run()  # single-year scope
     at.radio[2].set_value("Pearson").run()
     at.toggle[0].set_value(True).run()
+    assert not at.exception
+    # PCA & clustering controls
+    at.slider(key="mv_k").set_value(3).run()
+    at.radio(key="mv_period").set_value(at.radio(key="mv_period").options[1]).run()
+    at.selectbox(key="mv_ncomp").set_value(3).run()
     assert not at.exception
 
 

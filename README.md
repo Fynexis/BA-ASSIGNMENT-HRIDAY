@@ -17,7 +17,10 @@ The dashboard reads a workbook in the layout of [`data/capiq_template.xlsx`](dat
 | **Company Matrix** | All 25 ratios × 10 years for one company. The industry's 4 driver ratios are highlighted. Summary tiles show the selected year's value, the change from the previous year and the peer percentile. A reasoning panel explains each driver ratio and compares the company with the industry median. |
 | **Industry Stats** | Pick a category (Profitability, Liquidity, …). You get each ratio's median, mean, P25/P75, min/max, how many companies have a value, and the best company; a 10-year industry trend band; a category-score leaderboard; and industry medians side by side. |
 | **Ratio Correlations** | A 25 × 25 heatmap (Spearman by default, or Pearson; all years or one year). Also lists the strongest pairs that move together and that move in opposite directions, with how many observations each pair uses. A pair explorer says in plain English what Y does when X goes up, with a scatter plot and slope. A "what moves with this ratio" chart ranks the other 24 ratios. |
+| **PCA & Clustering** | **Step 1** groups the *ratios*: PCA (eigenvalue > 1, varimax) gives a scree plot, loadings, and each ratio's component compared with its textbook category. **Step 2** groups the *companies*: k-means on the component scores, with silhouette scores for choosing k, a 2-D map, a cluster × industry table with the Adjusted Rand Index, cluster profiles, and a Ward stability check. **Step 3** runs a Kruskal–Wallis test with eta² to find which ratios separate the industries. A CSV export lets you reproduce it in jamovi. Code: `multivariate.py`. |
 | **Data & Checks** | Notes on how the data was cleaned, a list of suspicious values to verify (e.g. dividend yield above 10%, negative equity, EBITDA near zero), the formula for every ratio, and CSV downloads for jamovi or Excel. |
+
+See [docs/PROJECT_BRIEF.md](docs/PROJECT_BRIEF.md) for the research questions, the method step by step, and how to reproduce the results in jamovi.
 
 ## How the ratios are calculated
 
