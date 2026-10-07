@@ -1,14 +1,17 @@
 """Core engine for the Cluster & Ratio Analysis Dashboard.
 
 Holds everything that is not UI: the 25 universal ratio definitions, the
-industry highlight map, the driver reasoning text, the simulated 10-year
-dataset for 100 companies, and the styling/formatting helpers used by the
-matrix. Kept free of Streamlit so it can be tested on its own.
+industry highlight map, the driver reasoning text, the loader that turns a
+company financials workbook into the 25 ratios, the correlation / industry
+analytics, and the styling helpers used by the matrix. Kept free of
+Streamlit so it can be tested on its own.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -22,42 +25,41 @@ import pandas as pd
 class RatioSpec:
     category: str
     unit: str  # "x" (multiple), "%" (percentage) or "days"
-    low: float  # typical cross-industry range used for simulation
-    high: float
+    formula: str
     higher_is_better: bool = True
 
 
 RATIO_SPECS: dict[str, RatioSpec] = {
     # Liquidity
-    "Current Ratio": RatioSpec("Liquidity", "x", 0.8, 3.0),
-    "Quick Ratio": RatioSpec("Liquidity", "x", 0.5, 2.5),
-    "Cash Ratio": RatioSpec("Liquidity", "x", 0.1, 1.5),
-    "Operating Cash Flow Ratio": RatioSpec("Liquidity", "x", 0.2, 1.8),
-    "Working Capital Ratio": RatioSpec("Liquidity", "x", 0.8, 2.8),
+    "Current Ratio": RatioSpec("Liquidity", "x", "Current Assets / Current Liabilities"),
+    "Quick Ratio": RatioSpec("Liquidity", "x", "(Current Assets − Inventory) / Current Liabilities"),
+    "Cash Ratio": RatioSpec("Liquidity", "x", "Cash & ST Investments / Current Liabilities"),
+    "Operating Cash Flow Ratio": RatioSpec("Liquidity", "x", "Cash from Operations / Current Liabilities"),
+    "Working Capital Ratio": RatioSpec("Liquidity", "x", "(Current Assets − Current Liabilities) / Total Assets"),
     # Profitability
-    "Gross Profit Margin": RatioSpec("Profitability", "%", 20.0, 60.0),
-    "Operating Profit Margin": RatioSpec("Profitability", "%", 5.0, 25.0),
-    "Net Profit Margin": RatioSpec("Profitability", "%", 2.0, 18.0),
-    "Return on Assets (ROA)": RatioSpec("Profitability", "%", 2.0, 12.0),
-    "Return on Equity (ROE)": RatioSpec("Profitability", "%", 6.0, 25.0),
+    "Gross Profit Margin": RatioSpec("Profitability", "%", "Gross Profit / Revenue × 100"),
+    "Operating Profit Margin": RatioSpec("Profitability", "%", "EBIT / Revenue × 100"),
+    "Net Profit Margin": RatioSpec("Profitability", "%", "Net Income / Revenue × 100"),
+    "Return on Assets (ROA)": RatioSpec("Profitability", "%", "Net Income / Total Assets × 100"),
+    "Return on Equity (ROE)": RatioSpec("Profitability", "%", "Net Income / Total Equity × 100 (equity > 0)"),
     # Efficiency
-    "Asset Turnover": RatioSpec("Efficiency", "x", 0.4, 1.8),
-    "Inventory Turnover": RatioSpec("Efficiency", "x", 3.0, 10.0),
-    "Receivables Turnover": RatioSpec("Efficiency", "x", 4.0, 12.0),
-    "Days Sales Outstanding (DSO)": RatioSpec("Efficiency", "days", 30.0, 90.0, higher_is_better=False),
-    "Days Inventory Outstanding (DIO)": RatioSpec("Efficiency", "days", 35.0, 120.0, higher_is_better=False),
+    "Asset Turnover": RatioSpec("Efficiency", "x", "Revenue / Total Assets"),
+    "Inventory Turnover": RatioSpec("Efficiency", "x", "COGS / Inventory (inventory reported)"),
+    "Receivables Turnover": RatioSpec("Efficiency", "x", "Revenue / Receivables"),
+    "Days Sales Outstanding (DSO)": RatioSpec("Efficiency", "days", "365 / Receivables Turnover", higher_is_better=False),
+    "Days Inventory Outstanding (DIO)": RatioSpec("Efficiency", "days", "365 / Inventory Turnover", higher_is_better=False),
     # Leverage
-    "Debt-to-Equity": RatioSpec("Leverage", "x", 0.3, 2.0, higher_is_better=False),
-    "Debt-to-Assets": RatioSpec("Leverage", "x", 0.2, 0.65, higher_is_better=False),
-    "Interest Coverage Ratio": RatioSpec("Leverage", "x", 2.0, 15.0),
-    "Equity Multiplier": RatioSpec("Leverage", "x", 1.4, 3.5, higher_is_better=False),
-    "Debt Service Coverage Ratio (DSCR)": RatioSpec("Leverage", "x", 1.1, 3.0),
+    "Debt-to-Equity": RatioSpec("Leverage", "x", "Total Debt / Total Equity (equity > 0)", higher_is_better=False),
+    "Debt-to-Assets": RatioSpec("Leverage", "x", "Total Debt / Total Assets", higher_is_better=False),
+    "Interest Coverage Ratio": RatioSpec("Leverage", "x", "EBIT / Interest Expense (interest > 0)"),
+    "Equity Multiplier": RatioSpec("Leverage", "x", "Total Assets / Total Equity (equity > 0)", higher_is_better=False),
+    "Debt Service Coverage Ratio (DSCR)": RatioSpec("Leverage", "x", "EBITDA / (Interest + Debt Repaid)"),
     # Valuation (lower multiples = cheaper, treated as "better" for colouring)
-    "Price-to-Earnings (P/E)": RatioSpec("Valuation", "x", 10.0, 30.0, higher_is_better=False),
-    "Price-to-Sales (P/S)": RatioSpec("Valuation", "x", 0.5, 4.0, higher_is_better=False),
-    "Price-to-Book (P/B)": RatioSpec("Valuation", "x", 1.0, 5.0, higher_is_better=False),
-    "EV/EBITDA": RatioSpec("Valuation", "x", 6.0, 18.0, higher_is_better=False),
-    "Dividend Yield": RatioSpec("Valuation", "%", 0.5, 4.0),
+    "Price-to-Earnings (P/E)": RatioSpec("Valuation", "x", "Market Cap / Net Income (profit > 0)", higher_is_better=False),
+    "Price-to-Sales (P/S)": RatioSpec("Valuation", "x", "Market Cap / Revenue", higher_is_better=False),
+    "Price-to-Book (P/B)": RatioSpec("Valuation", "x", "Market Cap / Total Equity (equity > 0)", higher_is_better=False),
+    "EV/EBITDA": RatioSpec("Valuation", "x", "Enterprise Value / EBITDA (EBITDA > 0)", higher_is_better=False),
+    "Dividend Yield": RatioSpec("Valuation", "%", "Dividend per Share / Share Price × 100"),
 }
 
 RATIO_CATEGORIES: dict[str, list[str]] = {}
@@ -66,69 +68,32 @@ for _name, _spec in RATIO_SPECS.items():
 
 UNIVERSAL_RATIOS: list[str] = list(RATIO_SPECS)
 
+# Pairs linked by how they are calculated, so a strong correlation between
+# them is expected rather than an economic finding.
+IDENTITY_PAIRS: set[frozenset[str]] = {
+    frozenset(p)
+    for p in [
+        ("Receivables Turnover", "Days Sales Outstanding (DSO)"),
+        ("Inventory Turnover", "Days Inventory Outstanding (DIO)"),
+        ("Return on Assets (ROA)", "Return on Equity (ROE)"),  # ROE = ROA × Equity Multiplier
+        ("Equity Multiplier", "Return on Equity (ROE)"),
+        ("Debt-to-Equity", "Equity Multiplier"),  # D/E = D/A × Equity Multiplier
+        ("Debt-to-Equity", "Debt-to-Assets"),
+        ("Current Ratio", "Quick Ratio"),  # same denominator, overlapping numerator
+    ]
+}
+
 # ==========================================
 # 2. INDUSTRY-SPECIFIC HIGHLIGHT MAP
 # ==========================================
 INDUSTRY_HIGHLIGHTS: dict[str, list[str]] = {
     "Technology / Software": ["Net Profit Margin", "Return on Equity (ROE)", "Current Ratio", "Price-to-Sales (P/S)"],
-    "Retail / E-Commerce": ["Gross Profit Margin", "Inventory Turnover", "Quick Ratio", "Receivables Turnover"],
-    "Heavy Manufacturing": ["Operating Profit Margin", "Asset Turnover", "Debt-to-Equity", "Interest Coverage Ratio"],
-    "Banking / Finance": ["Return on Assets (ROA)", "Equity Multiplier", "Cash Ratio", "Dividend Yield"],
+    "Pharmaceuticals": ["Gross Profit Margin", "Return on Equity (ROE)", "Days Sales Outstanding (DSO)", "Price-to-Earnings (P/E)"],
+    "FMCG": ["Operating Profit Margin", "Inventory Turnover", "Return on Equity (ROE)", "Dividend Yield"],
+    "Infrastructure / Heavy Manufacturing": ["Operating Profit Margin", "Asset Turnover", "Debt-to-Equity", "Interest Coverage Ratio"],
 }
 
-INDUSTRY_PREFIX: dict[str, str] = {
-    "Technology / Software": "Tech",
-    "Retail / E-Commerce": "Retail",
-    "Heavy Manufacturing": "Mfg",
-    "Banking / Finance": "Bank",
-}
-
-# Industry-specific simulation ranges that override the generic RatioSpec
-# range, so each cluster carries its characteristic financial fingerprint.
-# Ratios in DERIVED_RATIOS are computed from others, so they have no range here.
-INDUSTRY_PROFILES: dict[str, dict[str, tuple[float, float]]] = {
-    "Technology / Software": {
-        "Gross Profit Margin": (65.0, 85.0),
-        "Operating Profit Margin": (18.0, 35.0),
-        "Net Profit Margin": (15.0, 30.0),
-        "Return on Assets (ROA)": (10.0, 22.0),
-        "Current Ratio": (1.8, 4.0),
-        "Inventory Turnover": (15.0, 40.0),
-        "Debt-to-Equity": (0.1, 0.8),
-        "Price-to-Sales (P/S)": (4.0, 15.0),
-        "Price-to-Earnings (P/E)": (22.0, 50.0),
-        "Dividend Yield": (0.0, 1.2),
-    },
-    "Retail / E-Commerce": {
-        "Gross Profit Margin": (22.0, 45.0),
-        "Operating Profit Margin": (2.0, 9.0),
-        "Net Profit Margin": (1.0, 6.0),
-        "Inventory Turnover": (6.0, 14.0),
-        "Quick Ratio": (0.2, 0.9),
-        "Receivables Turnover": (20.0, 60.0),
-        "Asset Turnover": (1.5, 3.0),
-        "Price-to-Sales (P/S)": (0.3, 1.5),
-    },
-    "Heavy Manufacturing": {
-        "Gross Profit Margin": (18.0, 35.0),
-        "Operating Profit Margin": (7.0, 16.0),
-        "Asset Turnover": (0.5, 1.1),
-        "Inventory Turnover": (3.0, 6.0),
-        "Debt-to-Equity": (0.8, 2.2),
-        "Interest Coverage Ratio": (2.5, 9.0),
-        "EV/EBITDA": (6.0, 11.0),
-    },
-    "Banking / Finance": {
-        "Return on Assets (ROA)": (0.5, 1.6),
-        "Debt-to-Equity": (7.0, 14.0),
-        "Cash Ratio": (0.05, 0.25),
-        "Dividend Yield": (2.5, 6.0),
-        "Price-to-Book (P/B)": (0.7, 1.8),
-        "Price-to-Earnings (P/E)": (8.0, 15.0),
-        "Asset Turnover": (0.04, 0.10),
-        "Inventory Turnover": (0.0, 0.0),  # banks hold no inventory
-    },
-}
+DEFAULT_HIGHLIGHTS = ["Net Profit Margin", "Return on Equity (ROE)", "Debt-to-Equity", "Asset Turnover"]
 
 # ==========================================
 # 3. DYNAMIC DRIVER REASONING ENGINE
@@ -141,28 +106,32 @@ INSIGHTS_ENGINE: dict[str, dict[str, str]] = {
         "Current Ratio": "High liquidity requirement to protect massive, high-risk continuous R&D runways.",
         "Price-to-Sales (P/S)": "Crucial anchor ratio used by analysts because rapid topline growth often masks early-stage net earnings.",
     },
-    "Retail / E-Commerce": {
-        "title": "RETAIL CLUSTER DRIVERS (Low-Margin / High-Velocity)",
-        "Gross Profit Margin": "Tracks supplier bargaining power directly against aggressive seasonal markdowns.",
-        "Inventory Turnover": "The vital life-support pulse; measures cash velocity trapped on warehouse shelves.",
-        "Quick Ratio": "Strips away inventory to verify if raw cash can pay suppliers during quick market corrections.",
-        "Receivables Turnover": "Monitors speed of payment clearings from major digital merchant gateways and wholesale links.",
+    "Pharmaceuticals": {
+        "title": "PHARMA CLUSTER DRIVERS (R&D / Regulatory Model)",
+        "Gross Profit Margin": "Reflects product mix: branded, specialty and complex generics earn far more than commodity generics and APIs, and US price erosion shows up here first.",
+        "Return on Equity (ROE)": "R&D pipelines and new-drug filings are funded from shareholders' capital; ROE shows whether that intangible investment pays off.",
+        "Days Sales Outstanding (DSO)": "Export-heavy drug makers sell to overseas wholesalers and distributors on long credit terms; rising DSO flags collection risk or channel stuffing.",
+        "Price-to-Earnings (P/E)": "The market prices pipeline and regulatory (USFDA inspection) risk into the earnings multiple; de-ratings often follow warning letters.",
     },
-    "Heavy Manufacturing": {
-        "title": "MANUFACTURING CLUSTER DRIVERS (Capital-Intense / Structural Fixed Asset)",
-        "Operating Profit Margin": "Tracks literal factory-floor output efficiency before considering corporate debt loads.",
-        "Asset Turnover": "Validates whether huge multi-year machinery (PP&E) capital assets generate real revenue velocity.",
-        "Debt-to-Equity": "Assembly line infrastructure requires immense long-term debt; this maps fundamental solvency boundaries.",
-        "Interest Coverage Ratio": "Measures if operating income securely dwarfs the persistent weight of recurring loan interest.",
+    "FMCG": {
+        "title": "FMCG CLUSTER DRIVERS (Brand / Distribution Model)",
+        "Operating Profit Margin": "Shows brand pricing power against volatile input costs (edible oils, grains, packaging): strong brands pass inflation on and protect margins.",
+        "Inventory Turnover": "Fast-moving goods with short shelf lives; turnover measures how efficiently the distribution network clears stock.",
+        "Return on Equity (ROE)": "Asset-light, low-working-capital business models let the strongest consumer brands earn exceptionally high returns on equity.",
+        "Dividend Yield": "Mature, cash-generative companies with high payout ratios; yield anchors valuation for income-focused investors.",
     },
-    "Banking / Finance": {
-        "title": "BANKING CLUSTER DRIVERS (Highly-Leveraged Reserve Model)",
-        "Return on Assets (ROA)": "Since loan portfolios are the assets, minor ticks show tectonic shifts in credit underwriting quality.",
-        "Equity Multiplier": "Banks purposefully leverage capital base 10x-15x; this maps systemic scale risk.",
-        "Cash Ratio": "Strict control verification metric to track mandatory central bank liquidity reserve compliance.",
-        "Dividend Yield": "Capital clusters are traditionally mature frameworks satisfying long-term yield institutional fund mandates.",
+    "Infrastructure / Heavy Manufacturing": {
+        "title": "INFRA & MANUFACTURING CLUSTER DRIVERS (Capital-Intense / Fixed Asset)",
+        "Operating Profit Margin": "Tracks factory-floor and project execution efficiency before considering corporate debt loads.",
+        "Asset Turnover": "Validates whether large multi-year plant and machinery investments generate real revenue.",
+        "Debt-to-Equity": "Plants and projects are funded with long-term debt; this maps fundamental solvency boundaries.",
+        "Interest Coverage Ratio": "Measures whether operating income comfortably covers the recurring weight of loan interest.",
     },
 }
+
+
+def highlights_for(industry: str) -> list[str]:
+    return INDUSTRY_HIGHLIGHTS.get(industry, DEFAULT_HIGHLIGHTS)
 
 
 def build_insight_markdown(
@@ -175,160 +144,228 @@ def build_insight_markdown(
 
     When a company snapshot, anchor year and peer medians are given, each
     driver line also states the company's value and whether it beats the
-    cluster median, so the reasoning reacts to the current selection.
+    industry median, so the reasoning reacts to the current selection.
     """
-    insight = INSIGHTS_ENGINE[industry]
+    insight = INSIGHTS_ENGINE.get(industry, {"title": f"{industry.upper()} CLUSTER DRIVERS"})
     lines = [f"💡 **{insight['title']}**", ""]
-    for ratio in INDUSTRY_HIGHLIGHTS[industry]:
-        line = f"* **{ratio}**: {insight[ratio]}"
+    for ratio in highlights_for(industry):
+        line = f"* **{ratio}**: {insight.get(ratio, RATIO_SPECS[ratio].formula)}"
         if company_df is not None and year is not None and peer_medians is not None:
             value = float(company_df.at[ratio, year])
             median = float(peer_medians[ratio])
-            verdict = "ahead of" if is_favourable(ratio, value, median) else "behind"
-            line += (
-                f"  \n  ↳ {year}: **{format_value(ratio, value)}** vs cluster median "
-                f"{format_value(ratio, median)} — {verdict} peers."
-            )
+            if np.isnan(value) or np.isnan(median):
+                line += f"  \n  ↳ {year}: not meaningful for this company (see data notes)."
+            else:
+                verdict = "ahead of" if is_favourable(ratio, value, median) else "behind"
+                line += (
+                    f"  \n  ↳ {year}: **{format_value(ratio, value)}** vs industry median "
+                    f"{format_value(ratio, median)} — {verdict} peers."
+                )
         lines.append(line)
     return "\n".join(lines)
 
 
 # ==========================================
-# 4. DATA ENGINE (10 YEARS × 100 COMPANIES)
+# 4. DATA LOADER: FINANCIALS → 25 RATIOS
 # ==========================================
-YEARS: list[str] = [str(y) for y in range(2017, 2027)]
-COMPANIES_PER_INDUSTRY = 25
-DEFAULT_SEED = 42
+# Columns expected in the "Data" sheet (same layout as data/capiq_template.xlsx).
+ITEM_COLUMNS = [
+    "Total Revenue", "Cost of Goods Sold", "Gross Profit", "EBIT", "EBITDA", "Interest Expense", "Net Income",
+    "Total Current Assets", "Total Current Liabilities", "Cash & ST Investments", "Inventory", "Total Receivables",
+    "Total Assets", "Total Debt", "Total Equity", "Cash from Operations", "Debt Repaid", "Dividend per Share",
+    "Share Price (period end)", "Market Cap", "Total Enterprise Value",
+]
+PLACEHOLDER_NOTE = re.compile(r"set to 0:\s*(?P<items>[^;]+)", re.IGNORECASE)
 
 
-def ratio_range(industry: str, ratio: str) -> tuple[float, float]:
-    spec = RATIO_SPECS[ratio]
-    return INDUSTRY_PROFILES.get(industry, {}).get(ratio, (spec.low, spec.high))
+@dataclass
+class FinancialData:
+    raw: pd.DataFrame  # one row per company-year, cleaned financial items
+    ratios: pd.DataFrame  # one row per company-year, the 25 ratios
+    pool: dict[str, dict[str, pd.DataFrame]]  # {industry: {company: ratio matrix}}
+    years: list[str]
+    issues: list[str] = field(default_factory=list)
 
 
-# Latent drivers behind every ratio. Each company has a level on each factor,
-# the whole industry drifts together year to year (macro cycle), and each
-# company deviates around that. Ratios load on the factors, which is what
-# makes them correlate the way real statements do (e.g. more leverage ->
-# weaker interest coverage).
-FACTORS = ["Profitability", "Leverage", "Liquidity", "Efficiency", "Market Sentiment"]
-
-FACTOR_LOADINGS: dict[str, dict[str, float]] = {
-    "Current Ratio": {"Liquidity": 1.0, "Leverage": -0.4},
-    "Quick Ratio": {"Liquidity": 1.0, "Leverage": -0.3},
-    "Cash Ratio": {"Liquidity": 0.9, "Leverage": -0.3, "Profitability": 0.2},
-    "Operating Cash Flow Ratio": {"Liquidity": 0.5, "Profitability": 0.6, "Efficiency": 0.3},
-    "Working Capital Ratio": {"Liquidity": 1.0},
-    "Gross Profit Margin": {"Profitability": 0.9},
-    "Operating Profit Margin": {"Profitability": 1.0, "Efficiency": 0.2},
-    "Net Profit Margin": {"Profitability": 1.0, "Leverage": -0.2},
-    "Return on Assets (ROA)": {"Profitability": 0.8, "Efficiency": 0.5},
-    "Asset Turnover": {"Efficiency": 1.0},
-    "Inventory Turnover": {"Efficiency": 0.9},
-    "Receivables Turnover": {"Efficiency": 0.8},
-    "Debt-to-Equity": {"Leverage": 1.0},
-    "Interest Coverage Ratio": {"Profitability": 0.7, "Leverage": -0.7},
-    "Debt Service Coverage Ratio (DSCR)": {"Profitability": 0.6, "Leverage": -0.6, "Liquidity": 0.2},
-    "Price-to-Earnings (P/E)": {"Market Sentiment": 1.0},
-    "Price-to-Sales (P/S)": {"Market Sentiment": 0.8, "Profitability": 0.6},
-    "Price-to-Book (P/B)": {"Market Sentiment": 0.7, "Profitability": 0.6},
-    "EV/EBITDA": {"Market Sentiment": 0.9, "Profitability": 0.2},
-    "Dividend Yield": {"Market Sentiment": -0.8, "Profitability": 0.3},
-}
-
-# Ratios computed from others through accounting identities, in dependency order.
-DERIVED_RATIOS: dict[str, str] = {
-    "Equity Multiplier": "1 + Debt-to-Equity",
-    "Debt-to-Assets": "Debt-to-Equity / (1 + Debt-to-Equity)",
-    "Return on Equity (ROE)": "ROA × Equity Multiplier (DuPont)",
-    "Days Sales Outstanding (DSO)": "365 / Receivables Turnover",
-    "Days Inventory Outstanding (DIO)": "365 / Inventory Turnover",
-}
-
-# Pairs linked by definition, so a strong correlation between them is expected
-# rather than an economic finding.
-IDENTITY_PAIRS: set[frozenset[str]] = {
-    frozenset(p)
-    for p in [
-        ("Debt-to-Equity", "Equity Multiplier"),
-        ("Debt-to-Equity", "Debt-to-Assets"),
-        ("Equity Multiplier", "Debt-to-Assets"),
-        ("Return on Assets (ROA)", "Return on Equity (ROE)"),
-        ("Equity Multiplier", "Return on Equity (ROE)"),
-        ("Receivables Turnover", "Days Sales Outstanding (DSO)"),
-        ("Inventory Turnover", "Days Inventory Outstanding (DIO)"),
-    ]
-}
-
-IDIOSYNCRATIC_SD = 0.5  # company-specific, persistent part of each ratio
-YEARLY_NOISE_SD = 0.15  # one-off year-to-year noise
+def _read_table(source) -> pd.DataFrame:
+    """Read the Data sheet of an .xlsx workbook (header on row 2, Capital IQ
+    mnemonics on row 3) or a flat .csv with the same column names."""
+    name = str(getattr(source, "name", source)).lower()
+    if name.endswith(".csv"):
+        df = pd.read_csv(source)
+    else:
+        df = pd.read_excel(source, sheet_name="Data", header=1)
+        if len(df) and str(df.iloc[0].get("Total Revenue", "")).startswith("IQ_"):
+            df = df.iloc[1:]
+    missing = [c for c in ["Industry", "Company", *ITEM_COLUMNS] if c not in df.columns]
+    if missing:
+        raise ValueError(f"Data is missing columns: {', '.join(missing)}")
+    return df.dropna(subset=["Company"]).reset_index(drop=True)
 
 
-def _simulate_industry(rng: np.random.Generator, industry: str, n_companies: int, n_years: int) -> dict[str, np.ndarray]:
-    """Return ``{ratio: array[company, year]}`` for one industry."""
-    n_factors = len(FACTORS)
-    company_level = rng.normal(0.0, 1.0, (n_companies, n_factors))
-    # Industry-wide cycle shared by all companies (random walk).
-    macro = np.cumsum(rng.normal(0.0, 0.15, (n_years, n_factors)), axis=0)
-    # Company-specific deviations that persist for a few years (AR(1)).
-    deviation = np.zeros((n_companies, n_years, n_factors))
-    deviation[:, 0] = rng.normal(0.0, 0.3, (n_companies, n_factors))
-    for t in range(1, n_years):
-        deviation[:, t] = 0.6 * deviation[:, t - 1] + rng.normal(0.0, 0.3, (n_companies, n_factors))
-    factors = company_level[:, None, :] + macro[None, :, :] + deviation
-
-    values: dict[str, np.ndarray] = {}
-    for ratio, loadings in FACTOR_LOADINGS.items():
-        weights = np.array([loadings.get(f, 0.0) for f in FACTORS])
-        idio = rng.normal(0.0, IDIOSYNCRATIC_SD, (n_companies, 1))
-        noise = rng.normal(0.0, YEARLY_NOISE_SD, (n_companies, n_years))
-        norm = np.sqrt((weights**2).sum() + IDIOSYNCRATIC_SD**2 + YEARLY_NOISE_SD**2)
-        z = (factors @ weights + idio + noise) / norm
-        position = 1.0 / (1.0 + np.exp(-1.7 * z))  # squash into (0, 1)
-        low, high = ratio_range(industry, ratio)
-        values[ratio] = low + (high - low) * position
-
-    de = values["Debt-to-Equity"]
-    values["Equity Multiplier"] = 1.0 + de
-    values["Debt-to-Assets"] = de / (1.0 + de)
-    values["Return on Equity (ROE)"] = values["Return on Assets (ROA)"] * values["Equity Multiplier"]
-    values["Days Sales Outstanding (DSO)"] = 365.0 / values["Receivables Turnover"]
-    inv = values["Inventory Turnover"]
-    values["Days Inventory Outstanding (DIO)"] = np.divide(365.0, inv, out=np.zeros_like(inv), where=inv > 0)
-    return values
+def _fiscal_label(row: pd.Series) -> str:
+    period = str(row.get("Period", ""))
+    if re.fullmatch(r"FY\d{4}", period):
+        return period
+    date = pd.to_datetime(row.get("Period End Date"), errors="coerce")
+    if pd.isna(date):
+        raise ValueError(f"Cannot tell the fiscal year for {row['Company']} ({period})")
+    return f"FY{date.year}"
 
 
-def generate_dataset(
-    seed: int = DEFAULT_SEED,
-    companies_per_industry: int = COMPANIES_PER_INDUSTRY,
-    years: list[str] = YEARS,
-) -> dict[str, dict[str, pd.DataFrame]]:
-    """Return ``{industry: {company: DataFrame}}``.
+def clean_financials(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    """Numeric items, a FY label per row, and 'not reported, set to 0'
+    placeholders turned back into missing values."""
+    out = df.copy()
+    issues: list[str] = []
+    out["Year"] = out.apply(_fiscal_label, axis=1)
+    for col in ITEM_COLUMNS:
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+    notes = out["Notes"] if "Notes" in out.columns else pd.Series("", index=out.index)
+    n_placeholders = 0
+    for idx, note in notes.fillna("").astype(str).items():
+        m = PLACEHOLDER_NOTE.search(note)
+        if not m:
+            continue
+        for item in m.group("items").split(","):
+            col = next((c for c in ITEM_COLUMNS if c.lower() == item.strip().lower()), None)
+            if col:
+                out.at[idx, col] = np.nan
+                n_placeholders += 1
+    if n_placeholders:
+        issues.append(f"{n_placeholders} values marked 'not reported, set to 0' were treated as missing, not zero.")
+    dupes = int(out.duplicated(["Company", "Year"]).sum())
+    if dupes:
+        issues.append(f"{dupes} duplicate company-year rows were dropped.")
+        out = out.drop_duplicates(["Company", "Year"])
+    return out, issues
 
-    Each DataFrame is indexed by the 25 universal ratios, with a
-    ``Ratio Category`` column followed by one column per year.
-    """
-    rng = np.random.default_rng(seed)
+
+def _div(num: pd.Series, den: pd.Series) -> pd.Series:
+    """num / den, blank where the denominator is missing, zero or negative,
+    since those ratios are not meaningful."""
+    den = den.astype(float)
+    return (num.astype(float) / den.where(den > 0)).astype(float)
+
+
+def compute_ratios(fin: pd.DataFrame) -> pd.DataFrame:
+    """The 25 ratios for every company-year (formulas in RATIO_SPECS)."""
+    f = fin
+    r = pd.DataFrame(index=f.index)
+    cl = f["Total Current Liabilities"]
+    rev = f["Total Revenue"]
+    r["Current Ratio"] = _div(f["Total Current Assets"], cl)
+    r["Quick Ratio"] = _div(f["Total Current Assets"] - f["Inventory"].fillna(0), cl)
+    r["Cash Ratio"] = _div(f["Cash & ST Investments"], cl)
+    r["Operating Cash Flow Ratio"] = _div(f["Cash from Operations"], cl)
+    r["Working Capital Ratio"] = _div(f["Total Current Assets"] - cl, f["Total Assets"])
+    r["Gross Profit Margin"] = 100 * _div(f["Gross Profit"], rev)
+    r["Operating Profit Margin"] = 100 * _div(f["EBIT"], rev)
+    r["Net Profit Margin"] = 100 * _div(f["Net Income"], rev)
+    r["Return on Assets (ROA)"] = 100 * _div(f["Net Income"], f["Total Assets"])
+    r["Return on Equity (ROE)"] = 100 * _div(f["Net Income"], f["Total Equity"])
+    r["Asset Turnover"] = _div(rev, f["Total Assets"])
+    r["Inventory Turnover"] = _div(f["Cost of Goods Sold"], f["Inventory"])
+    r["Receivables Turnover"] = _div(rev, f["Total Receivables"])
+    days = pd.Series(365.0, index=f.index)
+    r["Days Sales Outstanding (DSO)"] = _div(days, r["Receivables Turnover"])
+    r["Days Inventory Outstanding (DIO)"] = _div(days, r["Inventory Turnover"])
+    r["Debt-to-Equity"] = _div(f["Total Debt"], f["Total Equity"])
+    r["Debt-to-Assets"] = _div(f["Total Debt"], f["Total Assets"])
+    r["Interest Coverage Ratio"] = _div(f["EBIT"], f["Interest Expense"])
+    r["Equity Multiplier"] = _div(f["Total Assets"], f["Total Equity"])
+    r["Debt Service Coverage Ratio (DSCR)"] = _div(f["EBITDA"], f["Interest Expense"] + f["Debt Repaid"].fillna(0))
+    r["Price-to-Earnings (P/E)"] = _div(f["Market Cap"], f["Net Income"])
+    r["Price-to-Sales (P/S)"] = _div(f["Market Cap"], rev)
+    r["Price-to-Book (P/B)"] = _div(f["Market Cap"], f["Total Equity"])
+    r["EV/EBITDA"] = _div(f["Total Enterprise Value"], f["EBITDA"])
+    r["Dividend Yield"] = 100 * _div(f["Dividend per Share"], f["Share Price (period end)"])
+    r = r.replace([np.inf, -np.inf], np.nan).round(4)
+    return pd.concat([f[["Industry", "Company", "Year"]], r[UNIVERSAL_RATIOS]], axis=1)
+
+
+def build_pool(ratios: pd.DataFrame, years: list[str]) -> dict[str, dict[str, pd.DataFrame]]:
     categories = [RATIO_SPECS[r].category for r in UNIVERSAL_RATIOS]
-    data_pool: dict[str, dict[str, pd.DataFrame]] = {}
+    pool: dict[str, dict[str, pd.DataFrame]] = {}
+    for (industry, company), grp in ratios.groupby(["Industry", "Company"], sort=False):
+        mat = grp.set_index("Year")[UNIVERSAL_RATIOS].T.reindex(columns=years).astype(float)
+        mat.index.name = "Ratio"
+        mat.insert(0, "Ratio Category", categories)
+        pool.setdefault(industry, {})[company] = mat
+    return pool
 
-    for industry in INDUSTRY_HIGHLIGHTS:
-        values = _simulate_industry(rng, industry, companies_per_industry, len(years))
-        data_pool[industry] = {}
-        for c_idx in range(companies_per_industry):
-            company_name = f"{INDUSTRY_PREFIX[industry]} Corp {c_idx + 1:02d}"
-            matrix = np.array([values[r][c_idx] for r in UNIVERSAL_RATIOS]).round(2)
-            df = pd.DataFrame(matrix, index=UNIVERSAL_RATIOS, columns=years)
-            df.index.name = "Ratio"
-            df.insert(0, "Ratio Category", categories)
-            data_pool[industry][company_name] = df
 
-    return data_pool
+def load_financials(source) -> FinancialData:
+    """Load a financials workbook/CSV and derive the 25 ratios."""
+    raw, issues = clean_financials(_read_table(source))
+    years = sorted(raw["Year"].unique())
+    ratios = compute_ratios(raw)
+    counts = raw.groupby("Company")["Year"].nunique()
+    short = counts[counts < len(years)]
+    if len(short):
+        issues.append(f"{len(short)} companies have fewer than {len(years)} years: {', '.join(short.index[:10])}.")
+    blanks = ratios[UNIVERSAL_RATIOS].isna().sum()
+    blanks = blanks[blanks > 0].sort_values(ascending=False)
+    if len(blanks):
+        top = ", ".join(f"{r} ({n})" for r, n in blanks.head(6).items())
+        issues.append(f"Ratios left blank where not meaningful, by number of company-years: {top}.")
+    return FinancialData(raw=raw, ratios=ratios, pool=build_pool(ratios, years), years=years, issues=issues)
+
+
+def data_checks(data: FinancialData) -> pd.DataFrame:
+    """Company-years whose numbers look suspicious, with the reason. The
+    values are kept as they are; this list is for the user to verify."""
+    raw, r = data.raw, data.ratios
+    checks = []
+
+    def flag(mask: pd.Series, issue: str, value_col: str | None = None, ratio: str | None = None) -> None:
+        for idx in mask[mask.fillna(False)].index:
+            value = ""
+            if ratio:
+                value = format_value(ratio, r.at[idx, ratio])
+            elif value_col:
+                value = f"{raw.at[idx, value_col]:,.2f}"
+            checks.append({"Company": raw.at[idx, "Company"], "Year": raw.at[idx, "Year"], "Value": value, "Issue": issue})
+
+    flag(r["Dividend Yield"] > 10, "Dividend yield above 10%: check the share price and dividend are on the same "
+         "split/bonus/demerger-adjusted basis.", ratio="Dividend Yield")
+    for m in ["Gross Profit Margin", "Operating Profit Margin", "Net Profit Margin"]:
+        flag(r[m] < -100, f"{m} below −100%: revenue is tiny relative to costs.", ratio=m)
+    flag(r["Gross Profit Margin"] >= 99.5, "Gross margin of ~100%: cost of goods sold is zero or missing.",
+         ratio="Gross Profit Margin")
+    flag(r["EV/EBITDA"] > 100, "EBITDA is close to zero, so EV/EBITDA is not meaningful.", ratio="EV/EBITDA")
+    flag(r["Debt-to-Equity"] > 10, "Debt-to-Equity above 10x: equity is nearly wiped out.", ratio="Debt-to-Equity")
+    flag(raw["Total Equity"] <= 0, "Negative equity: ROE, Debt-to-Equity, Equity Multiplier and P/B left blank.",
+         value_col="Total Equity")
+    price = raw["Share Price (period end)"]
+    repeated = raw.assign(_p=price).duplicated(["Company", "_p"], keep=False) & price.notna()
+    flag(repeated, "Same share price as another year for this company: check the price history.",
+         value_col="Share Price (period end)")
+    cols = ["Company", "Year", "Value", "Issue"]
+    return pd.DataFrame(checks, columns=cols).sort_values(["Company", "Year"]).reset_index(drop=True)
+
+
+def default_data_path() -> Path | None:
+    """First workbook/CSV found in the local data/ folder (git-ignored)."""
+    folder = Path(__file__).resolve().parent / "data"
+    for pattern in ("financials.xlsx", "financials.csv", "*.xlsx", "*.csv"):
+        for path in sorted(folder.glob(pattern)):
+            if "template" not in path.name:
+                return path
+    return None
+
+
+# ==========================================
+# 5. PEER COMPARISON, CORRELATION & INDUSTRY ANALYTICS
+# ==========================================
+def years_of(data_pool: dict[str, dict[str, pd.DataFrame]]) -> list[str]:
+    first = next(iter(next(iter(data_pool.values())).values()))
+    return [c for c in first.columns if c != "Ratio Category"]
 
 
 def peer_snapshot(data_pool: dict[str, dict[str, pd.DataFrame]], industry: str, year: str) -> pd.DataFrame:
     """Ratios (rows) × companies (columns) for one industry in one year."""
-    return pd.DataFrame({name: df[year] for name, df in data_pool[industry].items()})
+    return pd.DataFrame({name: df[year] for name, df in data_pool[industry].items()}).astype(float)
 
 
 def is_favourable(ratio: str, value: float, benchmark: float) -> bool:
@@ -338,17 +375,18 @@ def is_favourable(ratio: str, value: float, benchmark: float) -> bool:
 
 
 def peer_percentile(ratio: str, value: float, peer_values: pd.Series) -> float:
-    """Share of peers (0-100) the company is at least as good as."""
+    """Share of peers (0-100, among those with a value) the company is at
+    least as good as. NaN when the company has no value."""
+    peers = peer_values.dropna()
+    if pd.isna(value) or peers.empty:
+        return float("nan")
     if RATIO_SPECS[ratio].higher_is_better:
-        beaten = (peer_values <= value).sum()
+        beaten = (peers <= value).sum()
     else:
-        beaten = (peer_values >= value).sum()
-    return round(100.0 * beaten / len(peer_values), 1)
+        beaten = (peers >= value).sum()
+    return round(100.0 * beaten / len(peers), 1)
 
 
-# ==========================================
-# 5. CORRELATION & INDUSTRY ANALYTICS
-# ==========================================
 def industry_panel(
     data_pool: dict[str, dict[str, pd.DataFrame]], industry: str, year: str | None = None
 ) -> pd.DataFrame:
@@ -359,7 +397,7 @@ def industry_panel(
     frames = []
     for company, df in data_pool[industry].items():
         cols = [year] if year is not None else [c for c in df.columns if c != "Ratio Category"]
-        block = df[cols].T
+        block = df[cols].T.astype(float)
         block.index = pd.MultiIndex.from_product([[company], cols], names=["Company", "Year"])
         frames.append(block)
     panel = pd.concat(frames)
@@ -367,10 +405,19 @@ def industry_panel(
     return panel[UNIVERSAL_RATIOS]
 
 
+MIN_PAIRS = 10  # fewer paired observations than this and r is not reported
+
+
 def correlation_matrix(panel: pd.DataFrame, method: str = "pearson") -> pd.DataFrame:
-    """25 × 25 correlation matrix. Ratios with no variation (e.g. a bank's
-    inventory turnover) come out as NaN because correlation is undefined."""
-    return panel.corr(method=method)
+    """25 × 25 correlation matrix using all rows where both ratios exist.
+    Pairs with too few observations, or a ratio with no variation, are NaN."""
+    return panel.corr(method=method, min_periods=MIN_PAIRS)
+
+
+def pair_counts(panel: pd.DataFrame) -> pd.DataFrame:
+    """Number of observations where both ratios have a value."""
+    present = panel.notna().astype(int)
+    return present.T @ present
 
 
 def correlation_strength(r: float) -> str:
@@ -387,7 +434,7 @@ def correlation_strength(r: float) -> str:
 def describe_correlation(ratio_a: str, ratio_b: str, r: float) -> str:
     """Plain-language reading of a correlation coefficient."""
     if np.isnan(r):
-        return "Correlation cannot be measured: one of the ratios does not vary in this sample."
+        return "Correlation cannot be measured: one of the ratios does not vary or has too few values in this sample."
     strength = correlation_strength(r)
     if strength == "Negligible":
         return f"**{ratio_a}** and **{ratio_b}** move largely independently (r = {r:+.2f})."
@@ -402,7 +449,9 @@ def describe_correlation(ratio_a: str, ratio_b: str, r: float) -> str:
     )
 
 
-def top_correlations(corr: pd.DataFrame, include_identities: bool = True) -> pd.DataFrame:
+def top_correlations(
+    corr: pd.DataFrame, include_identities: bool = True, counts: pd.DataFrame | None = None
+) -> pd.DataFrame:
     """Every distinct ratio pair, sorted from strongest to weakest |r|."""
     rows = []
     names = list(corr.index)
@@ -414,25 +463,28 @@ def top_correlations(corr: pd.DataFrame, include_identities: bool = True) -> pd.
             identity = frozenset((a, b)) in IDENTITY_PAIRS
             if identity and not include_identities:
                 continue
-            rows.append(
-                {
-                    "Ratio A": a,
-                    "Ratio B": b,
-                    "r": round(float(r), 3),
-                    "Direction": "Move together ↑↑" if r > 0 else "Move opposite ↑↓",
-                    "Strength": correlation_strength(r),
-                    "Link": "Accounting identity" if identity else "Economic",
-                }
-            )
-    out = pd.DataFrame(rows, columns=["Ratio A", "Ratio B", "r", "Direction", "Strength", "Link"])
+            row = {
+                "Ratio A": a,
+                "Ratio B": b,
+                "r": round(float(r), 3),
+                "Direction": "Move together ↑↑" if r > 0 else "Move opposite ↑↓",
+                "Strength": correlation_strength(r),
+                "Link": "Linked by formula" if identity else "Economic",
+            }
+            if counts is not None:
+                row["n"] = int(counts.at[a, b])
+            rows.append(row)
+    cols = ["Ratio A", "Ratio B", "r", "Direction", "Strength", "Link"] + (["n"] if counts is not None else [])
+    out = pd.DataFrame(rows, columns=cols)
     return out.reindex(out["r"].abs().sort_values(ascending=False).index).reset_index(drop=True)
 
 
 def regression_slope(x: pd.Series, y: pd.Series) -> float:
     """Least-squares slope: change in y for a one-unit increase in x."""
-    if x.nunique() < 2:
+    both = pd.concat([x, y], axis=1).dropna()
+    if len(both) < 3 or both.iloc[:, 0].nunique() < 2:
         return float("nan")
-    return float(np.polyfit(x.astype(float), y.astype(float), 1)[0])
+    return float(np.polyfit(both.iloc[:, 0].astype(float), both.iloc[:, 1].astype(float), 1)[0])
 
 
 def industry_category_summary(
@@ -442,17 +494,21 @@ def industry_category_summary(
     snap = peer_snapshot(data_pool, industry, year).loc[RATIO_CATEGORIES[category]]
     rows = []
     for ratio, values in snap.iterrows():
-        best = values.idxmax() if RATIO_SPECS[ratio].higher_is_better else values.idxmin()
+        v = values.dropna()
+        best = "—"
+        if v.nunique() > 1:
+            best = v.idxmax() if RATIO_SPECS[ratio].higher_is_better else v.idxmin()
         rows.append(
             {
                 "Ratio": ratio,
-                "Median": values.median(),
-                "Mean": values.mean(),
-                "P25": values.quantile(0.25),
-                "P75": values.quantile(0.75),
-                "Min": values.min(),
-                "Max": values.max(),
-                "Best Company": best if values.nunique() > 1 else "—",
+                "Median": v.median(),
+                "Mean": v.mean(),
+                "P25": v.quantile(0.25),
+                "P75": v.quantile(0.75),
+                "Min": v.min(),
+                "Max": v.max(),
+                "Companies": len(v),
+                "Best Company": best,
             }
         )
     return pd.DataFrame(rows).set_index("Ratio")
@@ -461,7 +517,7 @@ def industry_category_summary(
 def industry_trend(data_pool: dict[str, dict[str, pd.DataFrame]], industry: str, ratio: str) -> pd.DataFrame:
     """Industry P25 / median / P75 for one ratio, by year."""
     rows = {}
-    for year in YEARS:
+    for year in years_of(data_pool):
         values = peer_snapshot(data_pool, industry, year).loc[ratio]
         rows[year] = {"P25": values.quantile(0.25), "Median": values.median(), "P75": values.quantile(0.75)}
     return pd.DataFrame(rows).T.rename_axis("Year")
@@ -478,20 +534,24 @@ def category_scores(
     data_pool: dict[str, dict[str, pd.DataFrame]], industry: str, category: str, year: str
 ) -> pd.Series:
     """Composite 0-100 score per company: its average peer percentile across
-    the category's ratios (direction-aware). Ratios with no variation are skipped."""
+    the category's ratios (direction-aware). Blank ratios and ratios with no
+    variation are skipped."""
     snap = peer_snapshot(data_pool, industry, year).loc[RATIO_CATEGORIES[category]]
     snap = snap[snap.nunique(axis=1) > 1]
-    scores = {
-        company: np.mean([peer_percentile(r, snap.at[r, company], snap.loc[r]) for r in snap.index])
-        for company in snap.columns
-    }
-    return pd.Series(scores, name=f"{category} Score").sort_values(ascending=False).round(1)
+    scores = {}
+    for company in snap.columns:
+        pcts = [peer_percentile(r, snap.at[r, company], snap.loc[r]) for r in snap.index]
+        pcts = [p for p in pcts if not np.isnan(p)]
+        scores[company] = np.mean(pcts) if pcts else np.nan
+    return pd.Series(scores, name=f"{category} Score").dropna().sort_values(ascending=False).round(1)
 
 
 # ==========================================
 # 6. FORMATTING & MATRIX STYLING
 # ==========================================
 def format_value(ratio: str, value: float) -> str:
+    if value is None or pd.isna(value):
+        return "—"
     unit = RATIO_SPECS[ratio].unit
     if unit == "%":
         return f"{value:.2f}%"

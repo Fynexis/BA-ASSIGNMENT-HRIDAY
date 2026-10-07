@@ -1,24 +1,36 @@
 # Cluster & Financial Ratio Analysis Dashboard
 
-A Streamlit dashboard that shows **25 universal financial ratios** for **100 simulated companies** (4 industries × 25 companies) over **10 years (2017–2026)**. For each industry it highlights the 4 ratios that matter most, and a reasoning engine explains why.
+A Streamlit dashboard that calculates **25 universal financial ratios** for listed companies from their financial statements. It is built for 100 Indian companies (25 each in IT, Pharmaceuticals, FMCG, and Infrastructure / Heavy Manufacturing) over FY2017–FY2026. For each industry it highlights the 4 ratios that matter most and explains why. It also gives industry statistics and shows how the ratios move together (correlations).
 
-![Company matrix](docs/dashboard.png)
+## Data
 
-| Industry stats | Ratio correlations |
+The dashboard reads a workbook in the layout of [`data/capiq_template.xlsx`](data/capiq_template.xlsx): a `Data` sheet with one row per company per fiscal year and 21 financial line items (revenue, net income, total assets, debt, cash flow, share price, market cap and so on).
+
+- **Getting the data:** fill the template with the S&P Capital IQ Excel plug-in, or with figures exported from another source such as Screener.in or CMIE Prowess, keeping the same column names. `scripts/make_capiq_template.py` rebuilds the template.
+- **Using it:** save it as `data/financials.xlsx` (or `.csv`), set `FINANCIALS_PATH`, or upload it from the dashboard's sidebar.
+- **Licensed data stays out of git.** Everything in `data/` except the template is git-ignored, because data from Capital IQ and Screener can't be redistributed. Keep your data file local.
+
+## What it shows
+
+| Tab | Contents |
 |---|---|
-| ![Industry stats](docs/industry_stats.png) | ![Correlations](docs/correlations.png) |
+| **Company Matrix** | All 25 ratios × 10 years for one company. The industry's 4 driver ratios are highlighted. Summary tiles show the selected year's value, the change from the previous year and the peer percentile. A reasoning panel explains each driver ratio and compares the company with the industry median. |
+| **Industry Stats** | Pick a category (Profitability, Liquidity, …). You get each ratio's median, mean, P25/P75, min/max, how many companies have a value, and the best company; a 10-year industry trend band; a category-score leaderboard; and industry medians side by side. |
+| **Ratio Correlations** | A 25 × 25 heatmap (Spearman by default, or Pearson; all years or one year). Also lists the strongest pairs that move together and that move in opposite directions, with how many observations each pair uses. A pair explorer says in plain English what Y does when X goes up, with a scatter plot and slope. A "what moves with this ratio" chart ranks the other 24 ratios. |
+| **Data & Checks** | Notes on how the data was cleaned, a list of suspicious values to verify (e.g. dividend yield above 10%, negative equity, EBITDA near zero), the formula for every ratio, and CSV downloads for jamovi or Excel. |
 
-## Features
+## How the ratios are calculated
 
-| Component | Where | What it does |
-|---|---|---|
-| 25 universal ratios | `ratio_engine.RATIO_SPECS` | 5 categories (Liquidity, Profitability, Efficiency, Leverage, Valuation) × 5 ratios. Each ratio has a unit (`x`, `%`, days), a typical range and a direction (higher or lower is better). |
-| 4 industry highlight matrices | `ratio_engine.INDUSTRY_HIGHLIGHTS` | Technology, Retail, Heavy Manufacturing and Banking each light up 4 driver ratios in emerald. The other 21 rows fade to grey. The anchor-year column is tinted. |
-| Simulated 10-year data | `ratio_engine.generate_dataset()` | Seeded and reproducible. Ratios are driven by 5 hidden factors (profitability, leverage, liquidity, efficiency, market sentiment), so they move together the way real ratios do: more debt goes with weaker interest coverage, for example. Each industry has its own ranges (`INDUSTRY_PROFILES`; banks run 8–15x leverage and hold no inventory). Five ratios are calculated exactly from others (`DERIVED_RATIOS`), e.g. ROE = ROA × Equity Multiplier and DSO = 365 / Receivables Turnover. |
-| Driver reasoning engine | `ratio_engine.INSIGHTS_ENGINE`, `build_insight_markdown()` | Gives the rationale for each driver ratio, plus the selected company's anchor-year value against the cluster median ("ahead of" / "behind" peers). |
-| Scorecards & trends | `app.py` → *Company Matrix* tab | Shows each driver's anchor-year value, the change from the previous year and the company's percentile among peers. Also draws a 10-year line chart of the company against the cluster median. |
-| Industry stats | *Industry Stats* tab | Pick a category (Profitability, Liquidity, …). You get the industry's median, mean, P25/P75, min/max and best company for each ratio; a 10-year industry trend band with the selected company on top; a category-score leaderboard of all 25 companies; and the 4 industries' medians side by side. |
-| Ratio correlations | *Ratio Correlations* tab | A 25 × 25 correlation heatmap (Pearson or Spearman, all years or one year). Also lists the strongest pairs that move together and the strongest that move in opposite directions, with ratios that are linked by definition filtered out. A pair explorer explains in plain English what Y does when X goes up, with a scatter plot and best-fit line. A "what moves with this ratio" chart ranks the other 24 ratios. |
+The formula for each ratio is in `ratio_engine.RATIO_SPECS` and in the dashboard's **Data & Checks** tab. Some ratios are left **blank** rather than given a misleading number:
+
+- **P/E** when the company made a loss
+- **ROE, Debt-to-Equity, Equity Multiplier and P/B** when equity is zero or negative
+- **Interest coverage** when there is no interest expense
+- **Inventory turnover and DIO** when no inventory is reported
+- **EV/EBITDA** when EBITDA is zero or negative
+- **Any value the data file marks "not reported, set to 0"**, which is treated as missing rather than zero
+
+Correlations use every company-year where both ratios have a value. A pair with fewer than 10 such observations is not reported.
 
 ## Run
 
@@ -34,13 +46,10 @@ pip install -r requirements.txt -r requirements-dev.txt
 pytest -q
 ```
 
-The tests cover:
-- the ratio and industry definitions
-- the dataset's shape, bounds, reproducibility and industry differences
-- the accounting identities
-- that correlation signs are realistic (e.g. leverage vs interest coverage is negative)
-- the industry statistics
-- the highlight styling and unit formatting
-- a headless `AppTest` run that clicks through every industry, category and correlation option
-
-> The data is simulated. The correlations show how the simulation links the ratios, not findings about real companies.
+The tests use a small made-up dataset in the same layout, so they don't need the licensed data. They cover:
+- the ratio formulas, checked against hand calculations
+- the blank-value rules
+- reading both .xlsx and .csv files
+- the data checks
+- the correlation and industry statistics
+- a headless run of the app through every industry, category and correlation option
