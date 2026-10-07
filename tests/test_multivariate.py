@@ -59,6 +59,10 @@ def test_clustering(prep):
     assert -1 <= clus.ari_industry <= 1 and -1 <= clus.ari_ward <= 1
     assert set(clus.silhouette.index) <= set(range(2, 9))
     assert clus.profile_z.shape == (3, len(prep.ratios))
+    # Every company sits closest to its own cluster's centre (k-means assignment rule)
+    d = np.linalg.norm(pca.scores.values[:, None, :] - clus.centers.values[None, :, :], axis=2)
+    assert (clus.centers.index[d.argmin(axis=1)] == clus.labels.values).all()
+    assert np.allclose(clus.distance.values, d.min(axis=1))
 
 
 def test_industry_separation(prep):

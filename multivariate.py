@@ -15,6 +15,12 @@ Each company is one row: the median of each ratio over the chosen years.
 Choices follow what jamovi/SPSS do by default (standardised variables,
 eigenvalue > 1, varimax rotation) so results can be reproduced there from
 the exported input file.
+
+Method references: Kaiser (1958) varimax; Kaiser (1960) eigenvalue > 1;
+MacQueen (1967) k-means; Ward (1963) hierarchical clustering; Rousseeuw
+(1987) silhouette; Hubert & Arabie (1985) adjusted Rand index; Kruskal &
+Wallis (1952) test, with eta² as in Tomczak & Tomczak (2014). Full list in
+docs/PROJECT_BRIEF.md and on the app page.
 """
 
 from __future__ import annotations
@@ -199,6 +205,8 @@ class ClusterResult:
     profile_z: pd.DataFrame  # cluster × ratio, mean standardised value
     profile_median: pd.DataFrame  # cluster × ratio, median in ratio units
     descriptions: dict[int, str]
+    centers: pd.DataFrame  # cluster × component: the cluster centre (mean component scores)
+    distance: pd.Series  # company → Euclidean distance to its own cluster centre
 
 
 def silhouette_by_k(scores: pd.DataFrame, k_range=range(2, 9)) -> pd.Series:
@@ -219,6 +227,12 @@ def cluster_companies(prep: PreparedData, pca: PCAResult, k: int) -> ClusterResu
     relabel = {old: new + 1 for new, old in enumerate(sizes.index)}
     labels = pd.Series([relabel[l] for l in km.labels_], index=scores.index, name="Cluster")
     ward = AgglomerativeClustering(n_clusters=k, linkage="ward").fit_predict(scores)
+    centers = pd.DataFrame(km.cluster_centers_, columns=scores.columns)
+    centers.index = [relabel[i] for i in range(k)]
+    centers = centers.sort_index().rename_axis("Cluster")
+    distance = pd.Series(
+        np.linalg.norm(scores.values - centers.loc[labels.values].values, axis=1), index=scores.index, name="Distance to centre"
+    )
 
     crosstab = pd.crosstab(labels, prep.industry.reindex(labels.index)).rename_axis(index="Cluster", columns=None)
     profile_z = prep.z.groupby(labels).mean()
@@ -239,6 +253,8 @@ def cluster_companies(prep: PreparedData, pca: PCAResult, k: int) -> ClusterResu
         profile_z=profile_z,
         profile_median=profile_median,
         descriptions=descriptions,
+        centers=centers,
+        distance=distance,
     )
 
 

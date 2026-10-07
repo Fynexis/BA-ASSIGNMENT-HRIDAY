@@ -35,11 +35,11 @@
 | 3. Missing values | Fill with the median of the company's industry (affects 2 values). | PCA needs a complete table. |
 | 4. Outliers | Cap each ratio at its 5th and 95th percentiles (winsorising). | Financial ratios are heavily skewed (Lev & Sunder, 1979). Without this, a handful of firms would dominate the components. |
 | 5. Standardise | Convert each ratio to a z-score (mean 0, standard deviation 1). | Puts ratios measured in %, x and days on the same scale. |
-| 6. PCA | Use the correlation matrix. Keep components with an eigenvalue above 1 (the Kaiser rule) and apply varimax rotation. | These are standard defaults, and jamovi and SPSS use the same ones. |
+| 6. PCA | Use the correlation matrix. Keep components with an eigenvalue above 1 (Kaiser, 1960) and apply varimax rotation (Kaiser, 1958). | These are standard defaults, and jamovi and SPSS use the same ones. |
 | 7. Interpret the components | Assign each ratio to the component it loads on most strongly. Compare this with the textbook categories. | This is the "grouping the ratios" answer. |
-| 8. Cluster the companies | Run k-means on the component scores. Choose k using the silhouette score, and also run k = 4 to compare with the 4 industries. | This is the "grouping the companies" answer. |
-| 9. Validate | Compare clusters with industries using a cluster × industry table and the Adjusted Rand Index (ARI). Check stability by comparing k-means with Ward clustering (also with ARI). | Tests whether financial profiles match industry membership. |
-| 10. Industry differences | Run a Kruskal–Wallis test per ratio across the industries, with eta² as the effect size. | Shows which ratios really tell the industries apart. This gives the industry "highlight" ratios a data-based justification. |
+| 8. Cluster the companies | Run k-means (MacQueen, 1967) on each company's component scores. Each company is assigned to the nearest of k cluster centres (Euclidean distance), the centres are recalculated as the cluster averages, and this repeats until nothing changes. The best of 50 random starts is kept. Choose k using the silhouette score (Rousseeuw, 1987), and also run k = 4 to compare with the 4 industries. Industry is not an input; it is only used afterwards for comparison. | This is the "grouping the companies" answer. |
+| 9. Validate | Compare clusters with industries using a cluster × industry table and the Adjusted Rand Index (ARI; Hubert & Arabie, 1985). Check stability by comparing k-means with Ward clustering (Ward, 1963), also with ARI. | Tests whether financial profiles match industry membership. |
+| 10. Industry differences | Run a Kruskal–Wallis test (Kruskal & Wallis, 1952) per ratio across the industries, with eta² as the effect size (Tomczak & Tomczak, 2014). | Shows which ratios really tell the industries apart. This gives the industry "highlight" ratios a data-based justification. |
 
 ## 5. Where each result is in the app
 
@@ -68,6 +68,9 @@
 
 ## 8. Key references
 
+**Financial ratio studies**
+
+
 - Pinches, G. E., Mingo, K. A., & Caruthers, J. K. (1973). The stability of financial patterns in industrial organizations. *Journal of Accounting Research, 11*(2), 389–396.
 - Chen, K. H., & Shimerda, T. A. (1981). An empirical analysis of useful financial ratios. *Financial Management, 10*(1), 51–60.
 - Gupta, M. C., & Huefner, R. J. (1972). A cluster analysis study of financial ratios and industry characteristics. *Journal of Accounting Research, 10*(1), 77–95.
@@ -76,3 +79,15 @@
 - Salmi, T., Virtanen, I., & Yli-Olli, P. (1990). *On the classification of financial ratios.* Acta Wasaensia No. 25.
 - Lev, B., & Sunder, S. (1979). Methodological issues in the use of financial ratios. *Journal of Accounting and Economics, 1*(3), 187–210.
 - Bhojraj, S., Lee, C. M. C., & Oler, D. K. (2003). What's my line? A comparison of industry classification schemes for capital market research. *Journal of Accounting Research, 41*(5), 745–774.
+
+**Statistical methods**
+
+- Hubert, L., & Arabie, P. (1985). Comparing partitions. *Journal of Classification, 2*(1), 193–218.
+- Kaiser, H. F. (1958). The varimax criterion for analytic rotation in factor analysis. *Psychometrika, 23*(3), 187–200.
+- Kaiser, H. F. (1960). The application of electronic computers to factor analysis. *Educational and Psychological Measurement, 20*(1), 141–151.
+- Kruskal, W. H., & Wallis, W. A. (1952). Use of ranks in one-criterion variance analysis. *Journal of the American Statistical Association, 47*(260), 583–621.
+- MacQueen, J. (1967). Some methods for classification and analysis of multivariate observations. *Proceedings of the Fifth Berkeley Symposium on Mathematical Statistics and Probability, 1*, 281–297.
+- Rousseeuw, P. J. (1987). Silhouettes: A graphical aid to the interpretation and validation of cluster analysis. *Journal of Computational and Applied Mathematics, 20*, 53–65.
+- Tomczak, M., & Tomczak, E. (2014). The need to report effect size estimates revisited: An overview of some recommended measures of effect size. *Trends in Sport Sciences, 21*(1), 19–25.
+- Ward, J. H. (1963). Hierarchical grouping to optimize an objective function. *Journal of the American Statistical Association, 58*(301), 236–244.
+

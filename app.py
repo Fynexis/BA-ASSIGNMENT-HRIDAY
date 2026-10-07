@@ -91,10 +91,12 @@ st.markdown(
     f"**{n_companies} companies** in {len(industries)} industries, {len(UNIVERSAL_RATIOS)} ratios, "
     f"fiscal years {YEARS[0]}–{YEARS[-1]}. Two questions, answered in order:\n"
     "1. **Grouping the ratios (PCA).** Many ratios measure the same thing. PCA reduces them to a few "
-    "underlying financial dimensions (*components*) and shows which ratios belong together.\n"
+    "underlying financial dimensions (*components*) and shows which ratios belong together, following "
+    "Pinches, Mingo & Caruthers (1973) and Chen & Shimerda (1981).\n"
     "2. **Grouping the companies (cluster analysis).** Companies are grouped by their scores on those "
-    "components, and the clusters are compared with the industries.\n\n"
-    "Each company is **one row**: the median of each ratio over the selected years."
+    "components, and the clusters are compared with the industries, following Gupta & Huefner (1972).\n\n"
+    "Each company is **one row**: the median of each ratio over the selected years. Full references are at "
+    "the bottom of the page."
 )
 st.caption(f"Source file: {source_name}")
 
@@ -124,10 +126,31 @@ for note in data.issues + prep.notes:
     st.caption(f"ℹ️ {note}")
 st.caption(f"{len(prep.z)} companies × {len(prep.ratios)} ratios used.")
 
+period_text = f"the median of FY{YEARS[0][2:]}–FY{YEARS[-1][2:]}" if years_sel is None else f"its {years_sel[0]} value"
+with st.expander("📐 How the data was prepared (what each data point is)", expanded=True):
+    st.markdown(
+        f"1. **One data point = one company.** For each of the {len(prep.z)} companies, each ratio is "
+        f"{period_text}. The median is used so that one unusual year does not distort the profile.\n"
+        f"2. **{len(prep.ratios)} ratios are used**; {len(UNIVERSAL_RATIOS) - len(prep.ratios)} are left out "
+        "(see Settings): inventory ratios cannot be calculated for most IT companies, and ratios that are "
+        "calculated from each other would count the same information twice.\n"
+        "3. **Missing values** are filled with the median of the company's own industry.\n"
+        f"4. **Extreme values are capped** at the {winsor:.0%} and {1 - winsor:.0%} percentiles of each ratio, because "
+        "financial ratios are highly skewed and a few outliers would otherwise dominate (Lev & Sunder, 1979).\n"
+        "5. **Each ratio is standardised** (z-score: mean 0, standard deviation 1) so ratios in %, x and days "
+        "count equally.\n\n"
+        "Ratios used: " + ", ".join(prep.ratios) + "."
+    )
+
 # ==========================================
 # STEP 1: PCA — GROUPING THE RATIOS
 # ==========================================
 st.markdown("## Step 1 · Grouping the ratios with PCA")
+st.markdown(
+    "PCA on the correlation matrix of the standardised ratios. Components with an **eigenvalue above 1** are "
+    "kept (Kaiser, 1960) and rotated with **varimax** (Kaiser, 1958) so each ratio loads mainly on one "
+    "component. Each ratio is then assigned to the component it loads on most strongly."
+)
 m1, m2, m3 = st.columns(3)
 m1.metric("Components kept", pca.n_components)
 m2.metric("Variance explained", f"{pca.explained['Cumulative %'].iloc[pca.n_components - 1]:.1f}%")
@@ -182,15 +205,39 @@ st.info(
         else ""
     )
 )
+st.caption(
+    "For comparison: Pinches et al. (1973) found about 7 stable ratio factors and Chen & Shimerda (1981) 7; "
+    "Salmi, Virtanen & Yli-Olli (1990) found 6 and noted that the textbook categories are not directly supported. "
+    "Gombola & Ketz (1983) found that cash-flow ratios can form a factor of their own."
+)
 
 # ==========================================
 # STEP 2: CLUSTER ANALYSIS — GROUPING THE COMPANIES
 # ==========================================
 st.markdown("## Step 2 · Grouping the companies with cluster analysis")
-st.markdown(
-    f"k-means clustering on the {pca.n_components} component scores. Pick the number of clusters; "
-    "the silhouette chart shows how well-separated each choice is."
-)
+comp_list = ", ".join(f"{c} ({labels[c]})" for c in comps)
+with st.expander("📐 How the clusters were formed", expanded=True):
+    st.markdown(
+        f"**Data points:** the {len(prep.z)} companies. **What each company is described by:** its "
+        f"{pca.n_components} component scores from Step 1 — {comp_list}. A score of 0 is the all-company "
+        "average; +1 is one standard deviation above it. Clustering on component scores rather than the "
+        f"{len(prep.ratios)} raw ratios stops overlapping ratios (e.g. ROA, ROE and net margin) from counting "
+        "profitability several times.\n\n"
+        "**Method: k-means** (MacQueen, 1967):\n"
+        f"1. Choose the number of clusters, k (here **{clus.k}**).\n"
+        "2. Place k starting centres in the component space.\n"
+        "3. Assign every company to its **nearest centre** (straight-line, Euclidean distance across all "
+        f"{pca.n_components} scores).\n"
+        "4. Move each centre to the **average** of the companies assigned to it.\n"
+        "5. Repeat steps 3–4 until no company changes cluster.\n"
+        "6. Do this from 50 different random starts and keep the solution with the smallest total "
+        "distance between companies and their centres. Clusters are numbered by size (1 = largest).\n\n"
+        "**Choosing k:** the average **silhouette** (Rousseeuw, 1987) measures how much closer each company is "
+        "to its own cluster than to the next one. **Checks:** the clusters are compared with the industries "
+        "and with a second method, Ward's hierarchical clustering (Ward, 1963), using the **Adjusted Rand Index** "
+        "(Hubert & Arabie, 1985). Industry is **not** used to form the clusters; it is only used afterwards to "
+        "compare, as in Gupta & Huefner (1972)."
+    )
 k_col, sil_col = st.columns([1, 3])
 with k_col:
     st.slider("Number of clusters (k)", 2, 8, 4, key="k", help=f"{len(industries)} lets you compare directly with the industries.")
@@ -232,7 +279,7 @@ scatter = (
         color=alt.Color("Cluster:N", scale=alt.Scale(domain=[f"Cluster {i}" for i in range(1, clus.k + 1)],
                                                      range=CLUSTER_COLORS[: clus.k])),
         shape=alt.Shape("Industry:N", scale=alt.Scale(domain=industries, range=SHAPES[: len(industries)]),
-                        legend=alt.Legend(labelLimit=240)),
+                        legend=alt.Legend(labelLimit=240, symbolSize=120, symbolFillColor="#52514e", symbolStrokeColor="#52514e")),
         tooltip=["Company", "Industry", "Cluster", alt.Tooltip("x:Q", format=".2f", title=comps[0]),
                  alt.Tooltip("y:Q", format=".2f", title=comps[1])],
     )
@@ -259,6 +306,22 @@ prof["All companies"] = prep.profiles[prep.ratios].median()
 prof = prof.loc[pca.assignment.index]
 st.dataframe(prof.apply(lambda col: [fmt(r, v) for r, v in col.items()]), width="stretch", height=len(prof) * 35 + 40)
 
+st.markdown("**Cluster centres** (average component scores; 0 = all-company average)")
+centres = clus.centers.copy()
+centres.index = [f"Cluster {i}" for i in centres.index]
+centres.columns = [f"{c}: {labels[c]}" for c in centres.columns]
+st.dataframe(centres.round(2), width="stretch")
+st.caption("Each company joined the cluster whose centre is nearest to its own scores.")
+
+with st.expander("The data points: each company's component scores and cluster"):
+    points = pca.scores.copy()
+    points.columns = [f"{c}: {labels[c]}" for c in points.columns]
+    points.insert(0, "Industry", prep.industry.reindex(points.index))
+    points["Cluster"] = clus.labels
+    points["Distance to centre"] = clus.distance
+    st.dataframe(points.sort_values(["Cluster", "Distance to centre"]).round(2), width="stretch", height=500)
+    st.caption("Smaller distance = more typical member of its cluster. These are exactly the numbers k-means used.")
+
 with st.expander("Companies in each cluster"):
     members = pd.DataFrame({"Cluster": clus.labels, "Industry": prep.industry.reindex(clus.labels.index)})
     for c in sorted(members["Cluster"].unique()):
@@ -269,8 +332,9 @@ with st.expander("Companies in each cluster"):
 # STEP 3: WHICH RATIOS SEPARATE THE INDUSTRIES
 # ==========================================
 st.markdown("## Step 3 · Which ratios really separate the industries?")
-st.markdown("Kruskal–Wallis test on each ratio across the industries. **eta²** = share of the ratio's "
-            "variation explained by industry (0.01 small, 0.06 medium, 0.14+ large).")
+st.markdown("Kruskal–Wallis test (Kruskal & Wallis, 1952) on each ratio's company medians across the industries. "
+            "**eta²** = (H − k + 1) / (n − k), the share of the ratio's variation explained by industry "
+            "(Tomczak & Tomczak, 2014; 0.01 small, 0.06 medium, 0.14+ large).")
 sep_chart = (
     alt.Chart(sep)
     .mark_bar(cornerRadiusEnd=4, height=12)
@@ -307,4 +371,32 @@ st.markdown(
     "3. **Clustering** (install the *snowCluster* module from the jamovi library): k-means on the PC columns "
     f"with k = {clus.k}. Cluster numbers may be ordered differently, but the groups will be the same or very close.\n"
     "4. **ANOVA → One-Way ANOVA (Non-parametric)** on each ratio by Industry reproduces Step 3."
+)
+
+# ==========================================
+# REFERENCES
+# ==========================================
+st.markdown("## References")
+st.markdown(
+    """
+**Financial ratio studies**
+- Chen, K. H., & Shimerda, T. A. (1981). An empirical analysis of useful financial ratios. *Financial Management, 10*(1), 51–60.
+- Gombola, M. J., & Ketz, J. E. (1983). A note on cash flow and classification patterns of financial ratios. *The Accounting Review, 58*(1), 105–114.
+- Gupta, M. C., & Huefner, R. J. (1972). A cluster analysis study of financial ratios and industry characteristics. *Journal of Accounting Research, 10*(1), 77–95.
+- Lev, B., & Sunder, S. (1979). Methodological issues in the use of financial ratios. *Journal of Accounting and Economics, 1*(3), 187–210.
+- Pinches, G. E., Mingo, K. A., & Caruthers, J. K. (1973). The stability of financial patterns in industrial organizations. *Journal of Accounting Research, 11*(2), 389–396.
+- Salmi, T., Virtanen, I., & Yli-Olli, P. (1990). *On the classification of financial ratios: A factor and transformation analysis of accrual, cash flow, and market-based ratios.* Acta Wasaensia No. 25, University of Vaasa.
+
+**Statistical methods**
+- Hubert, L., & Arabie, P. (1985). Comparing partitions. *Journal of Classification, 2*(1), 193–218.
+- Kaiser, H. F. (1958). The varimax criterion for analytic rotation in factor analysis. *Psychometrika, 23*(3), 187–200.
+- Kaiser, H. F. (1960). The application of electronic computers to factor analysis. *Educational and Psychological Measurement, 20*(1), 141–151.
+- Kruskal, W. H., & Wallis, W. A. (1952). Use of ranks in one-criterion variance analysis. *Journal of the American Statistical Association, 47*(260), 583–621.
+- MacQueen, J. (1967). Some methods for classification and analysis of multivariate observations. *Proceedings of the Fifth Berkeley Symposium on Mathematical Statistics and Probability, 1*, 281–297.
+- Rousseeuw, P. J. (1987). Silhouettes: A graphical aid to the interpretation and validation of cluster analysis. *Journal of Computational and Applied Mathematics, 20*, 53–65.
+- Tomczak, M., & Tomczak, E. (2014). The need to report effect size estimates revisited: An overview of some recommended measures of effect size. *Trends in Sport Sciences, 21*(1), 19–25.
+- Ward, J. H. (1963). Hierarchical grouping to optimize an objective function. *Journal of the American Statistical Association, 58*(301), 236–244.
+
+**Data:** company financial statements and share prices from Screener.in (consolidated accounts, FY2017–FY2026).
+"""
 )
